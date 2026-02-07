@@ -1,0 +1,27 @@
+{
+  "name": "open-claude-code",
+  "version": "0.1.0",
+  "displayName": "OpenClaudeCode",
+  "description": "Multi-channel messaging gateway for Claude Code - connect WhatsApp, Telegram, Discord and more",
+  "author": "OpenClaudeCode",
+  "commands": [
+    {
+      "name": "gateway-start",
+      "file": "commands/gateway-start.md"
+    },
+    {
+      "name": "channel-connect",
+      "file": "commands/channel-connect.md"
+    },
+    {
+      "name": "channel-status",
+      "file": "commands/channel-status.md"
+    }
+  ],
+  "agents": [
+    {
+      "name": "messaging-agent",
+      "file": "agents/messaging-agent.md"
+    }
+  ]
+}

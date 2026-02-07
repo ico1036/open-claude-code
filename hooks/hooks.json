@@ -1,0 +1,20 @@
+{
+  "hooks": [
+    {
+      "event": "on_tool_call",
+      "pattern": "list_messages",
+      "description": "Check for new messages when listing",
+      "action": "notify"
+    },
+    {
+      "event": "on_message_received",
+      "description": "Notify when a new message arrives on any channel",
+      "action": "alert",
+      "config": {
+        "channels": ["whatsapp", "telegram", "discord"],
+        "showPreview": true,
+        "maxPreviewLength": 100
+      }
+    }
+  ]
+}

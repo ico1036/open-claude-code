@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "open-claude-code": {
+      "command": "node",
+      "args": ["packages/gateway/dist/index.js"],
+      "env": {}
+    }
+  }
+}
