@@ -6,6 +6,8 @@ An open-source project that turns Claude Code into a multi-channel messaging AI 
 
 Connect Telegram, WhatsApp, or Discord and Claude will automatically respond to messages, form its own personality through conversation, and remember everything across sessions.
 
+> **Status**: Telegram is fully tested and working. WhatsApp and Discord adapters are implemented but not yet tested in production.
+
 Built on the official **Claude Agent SDK** — uses your Claude Max subscription legitimately through `query()`. No API key hacking, no ToS violations, no ban risk.
 
 ## Why This Exists
