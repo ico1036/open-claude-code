@@ -30,6 +30,8 @@ import type { MessageStore } from "./message-store.js";
 import type { MemoryManager } from "./memory-manager.js";
 import type { MessageRouter } from "./message-router.js";
 import { createAgentMcpServer, type AgentMcpDeps } from "./agent-mcp.js";
+import { createTypingController } from "./typing-controller.js";
+import { createReplyTracker } from "./reply-tracker.js";
 import { loadConfig, getDataDir } from "./config.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -76,12 +78,32 @@ type SubagentDef = {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
+// TODO: Implement automatic block-reply pipeline (like OpenClaw's BlockReplyPipeline)
+// that captures agent stream text_delta and sends intermediate chunks to the user
+// without requiring explicit send_message calls. Current workaround: prompt-based.
+
 const DEFAULT_SYSTEM_PROMPT = `You are a helpful AI assistant responding to messages via the OpenClaudeCode messaging gateway.
 You have access to MCP tools to send messages back. Use the send_message tool to reply.
 Be concise and helpful. Match the language of the incoming message.
-When you receive a message, respond directly using the send_message tool.`;
+When you receive a message, respond directly using the send_message tool.
+
+IMPORTANT - Progress reporting:
+- For tasks that take more than a few steps, send progress updates via send_message.
+- Example: "파일 3개 확인 완료, 이제 수정 시작합니다" or "50% 완료, CSS 작업 중입니다"
+- Send an update at least every 3-5 tool calls during long tasks.
+- Always send a final summary when the task is complete.
+- Never leave the user waiting with no updates for a long time.`;
 
 const RESET_COMMANDS = ["/new", "/reset", "/리셋", "/새로"];
+
+/** Error fallback messages by Agent SDK result subtype */
+const ERROR_FALLBACK: Record<string, string> = {
+  error_max_turns: "처리 시간이 초과되었습니다. 다시 시도해 주세요.",
+  error_max_budget_usd: "처리 예산이 초과되었습니다. 다시 시도해 주세요.",
+  error_during_execution: "처리 중 오류가 발생했습니다. 다시 시도해 주세요.",
+};
+const DEFAULT_ERROR = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.";
+const NO_REPLY_FALLBACK = "죄송합니다, 응답을 생성하지 못했습니다. 다시 시도해 주세요.";
 
 /** Persona files loaded in order, each becoming a section */
 const PERSONA_FILES = [
@@ -103,6 +125,7 @@ export class AgentRunner {
   private queues = new Map<string, QueueEntry[]>();
   private activeSessions = new Set<string>();
   private inProcessMcp: ReturnType<typeof createAgentMcpServer> | null = null;
+  private mcpDeps: AgentMcpDeps | null = null;
   private sessionsDir: string;
   private dataDir: string;
   private skillsCache: SkillMeta[] | null = null;
@@ -120,8 +143,8 @@ export class AgentRunner {
       model: "claude-sonnet-4-5-20250929",
       maxConcurrent: 3,
       debounceMs: 1500,
-      maxTurns: 10,
-      maxBudgetPerMessage: 0.50,
+      maxTurns: 0,
+      maxBudgetPerMessage: 999,
       maxMessageLength: 4000,
       bannedPatterns: [],
       enableSubagents: true,
@@ -150,12 +173,15 @@ export class AgentRunner {
     this.channelManager = channelManager;
     this.messageRouter = messageRouter;
 
-    this.inProcessMcp = createAgentMcpServer({
+    const deps: AgentMcpDeps = {
       messageRouter,
       store: this.store,
       memoryManager: this.memoryManager,
       dataDir: this.dataDir,
-    });
+      messageSentHandlers: new Map(),
+    };
+    this.mcpDeps = deps;
+    this.inProcessMcp = createAgentMcpServer(deps);
 
     const skillCount = this.loadSkills().length;
     console.log(`[agent-runner] In-process MCP server created with 7 tools`);
@@ -641,7 +667,7 @@ Be concise - code speaks louder than comments.`,
   // ─── Agent Invocation ────────────────────────────────────────────────────
 
   private async invokeAgent(key: string, messages: ChannelMessage[]): Promise<void> {
-    if (!this.inProcessMcp) {
+    if (!this.inProcessMcp || !this.mcpDeps) {
       console.error(`[agent-runner] In-process MCP not initialized. Call setDependencies() first.`);
       return;
     }
@@ -666,6 +692,8 @@ Be concise - code speaks louder than comments.`,
       .map((m) => m.text ?? "(media/attachment)")
       .join("\n");
 
+    const replyTo = lastMsg.chatType === "dm" ? lastMsg.from.id : (lastMsg.to?.id ?? lastMsg.from.id);
+
     const userPrompt = [
       `## Incoming message`,
       `- **Channel**: ${lastMsg.channel}`,
@@ -676,23 +704,49 @@ Be concise - code speaks louder than comments.`,
       `**Message:**`,
       messageTexts,
       "",
-      `Reply using the send_message tool with channel="${lastMsg.channel}" and to="${lastMsg.chatType === "dm" ? lastMsg.from.id : (lastMsg.to?.id ?? lastMsg.from.id)}".`,
+      `Reply using the send_message tool with channel="${lastMsg.channel}" and to="${replyTo}".`,
     ].join("\n");
 
     console.log(`[agent-runner] Invoking agent for ${key} (${messages.length} message(s))`);
 
-    // Send typing indicator
-    const typingChatId = lastMsg.chatType === "dm" ? lastMsg.from.id : (lastMsg.to?.id ?? lastMsg.from.id);
-    const sendTyping = () => {
-      this.channelManager?.sendTyping(lastMsg.channel, typingChatId, lastMsg.accountId).catch(() => {});
+    // --- 1. TypingController ---
+    const typingChatId = replyTo;
+    const typing = createTypingController({
+      sendTyping: () => {
+        this.channelManager?.sendTyping(lastMsg.channel, typingChatId, lastMsg.accountId).catch(() => {});
+      },
+    });
+
+    // --- 2. ReplyTracker ---
+    const tracker = createReplyTracker();
+
+    // --- 3. Register messageSentHandlers callback ---
+    const handlerKey = `${lastMsg.channel}:${replyTo}`;
+    this.mcpDeps.messageSentHandlers.set(handlerKey, () => {
+      tracker.recordSend();
+      typing.refresh();
+    });
+
+    // --- 4. Helper: send fallback message ---
+    const sendFallback = async (text: string) => {
+      try {
+        await this.messageRouter?.send(
+          lastMsg.channel,
+          { to: replyTo, text },
+          lastMsg.accountId ?? "default",
+        );
+      } catch (fallbackErr) {
+        console.error(`[agent-runner] Failed to send fallback for ${key}:`, fallbackErr);
+      }
     };
-    sendTyping();
-    const typingInterval = setInterval(sendTyping, 4000);
 
     const abortController = new AbortController();
     const sessionId = this.sessions.get(key);
 
     try {
+      // --- Start typing ---
+      await typing.start();
+
       const systemPrompt = this.loadPersona();
       const subagents = this.buildSubagents();
       const hooks = this.buildHooks();
@@ -712,6 +766,7 @@ Be concise - code speaks louder than comments.`,
         allowedTools.push("Task");
       }
 
+      // --- 5. Agent SDK query() stream ---
       const q = query({
         prompt: userPrompt,
         options: {
@@ -731,13 +786,17 @@ Be concise - code speaks louder than comments.`,
           allowedTools,
           ...(hasSubagents ? { agents: subagents } : {}),
           hooks,
-          maxTurns: this.config.maxTurns,
+          ...(this.config.maxTurns > 0 ? { maxTurns: this.config.maxTurns } : {}),
           maxBudgetUsd: this.config.maxBudgetPerMessage,
           abortController,
         },
       });
 
+      console.log(`[agent-runner] query() started for ${key} (maxTurns: ${this.config.maxTurns || "unlimited"}, maxBudget: $${this.config.maxBudgetPerMessage})`);
+
       let resultSubtype = "unknown";
+      let turnCount = 0;
+      let lastToolUsed = "";
 
       for await (const msg of q) {
         // Capture session ID for resume
@@ -745,22 +804,53 @@ Be concise - code speaks louder than comments.`,
           this.sessions.set(key, msg.session_id);
         }
 
-        // Refresh typing indicator on activity
+        // Refresh typing on assistant activity
         if (msg.type === "assistant") {
-          sendTyping();
+          turnCount++;
+          typing.refresh();
+        }
+
+        // Track last tool used for diagnostics
+        if (msg.type === "assistant" && "message" in msg) {
+          const assistantMsg = msg as { message?: { content?: Array<{ type: string; name?: string }> } };
+          const toolUse = assistantMsg.message?.content?.findLast?.((b: { type: string }) => b.type === "tool_use");
+          if (toolUse && "name" in toolUse) {
+            lastToolUsed = (toolUse as { name: string }).name;
+          }
         }
 
         // Track costs from result
         if (msg.type === "result") {
           resultSubtype = msg.subtype;
+          const resultMsg = msg as { usage?: { total_cost_usd?: number }; subtype: string };
+          const cost = resultMsg.usage?.total_cost_usd ?? 0;
           if (msg.subtype === "success") {
-            const cost = (msg as { usage?: { total_cost_usd?: number } }).usage?.total_cost_usd ?? 0;
-            console.log(`[agent-runner] Session ${key} completed. Cost: $${cost.toFixed(4)}`);
+            console.log(`[agent-runner] Session ${key} completed. turns=${turnCount}, cost=$${cost.toFixed(4)}, sent=${tracker.getSentCount()}`);
           } else {
-            console.error(`[agent-runner] Session ${key} ended: ${msg.subtype}`);
+            console.error(`[agent-runner] Session ${key} ended: ${msg.subtype} | turns=${turnCount}, cost=$${cost.toFixed(4)}, sent=${tracker.getSentCount()}, lastTool=${lastToolUsed}`);
           }
         }
       }
+
+      // --- 6. Agent run complete ---
+      typing.markRunComplete();
+
+      // --- 7. Always notify user of outcome ---
+      if (resultSubtype === "success") {
+        // Success but agent never called send_message
+        if (!tracker.hasSent()) {
+          console.log(`[agent-runner] No reply sent for ${key} (success), sending fallback`);
+          await sendFallback(NO_REPLY_FALLBACK);
+        }
+      } else {
+        // Error exit: always tell the user, even if partial replies were sent
+        const fallbackText = ERROR_FALLBACK[resultSubtype] ?? DEFAULT_ERROR;
+        console.log(`[agent-runner] Error exit for ${key} (${resultSubtype}, sent=${tracker.getSentCount()}), notifying user`);
+        await sendFallback(fallbackText);
+      }
+
+      // --- 8. Dispatch idle ---
+      typing.markDispatchIdle();
 
       // Daily log
       this.appendDailyLog(key, messageTexts.slice(0, 300), resultSubtype);
@@ -770,9 +860,13 @@ Be concise - code speaks louder than comments.`,
         console.log(`[agent-runner] Session ${key} aborted`);
       } else {
         console.error(`[agent-runner] Session ${key} failed:`, err);
+        // Exception: always notify user
+        await sendFallback(DEFAULT_ERROR);
       }
     } finally {
-      clearInterval(typingInterval);
+      // --- 9. Cleanup ---
+      typing.cleanup();
+      this.mcpDeps?.messageSentHandlers.delete(handlerKey);
     }
   }
 

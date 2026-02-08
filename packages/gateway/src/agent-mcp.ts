@@ -19,6 +19,8 @@ export type AgentMcpDeps = {
   store: MessageStore;
   memoryManager: MemoryManager;
   dataDir: string;
+  /** Per-conversation callbacks fired when send_message succeeds (key: "channel:to") */
+  messageSentHandlers: Map<string, () => void>;
 };
 
 /** Valid persona file names that the agent can read/write */
@@ -47,6 +49,11 @@ export function createAgentMcpServer(deps: AgentMcpDeps) {
             { to: args.to, text: args.text, replyToId: args.replyToId },
             args.accountId ?? "default",
           );
+          // Notify the reply tracker for this conversation
+          if (result.success) {
+            const handlerKey = `${args.channel}:${args.to}`;
+            deps.messageSentHandlers.get(handlerKey)?.();
+          }
           return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           };

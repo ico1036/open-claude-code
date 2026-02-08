@@ -24,10 +24,10 @@ const AgentRunnerConfigSchema = z.object({
   maxConcurrent: z.number().default(3),
   /** Debounce ms - wait before responding (batch rapid messages) */
   debounceMs: z.number().default(1500),
-  /** Max conversation turns per invocation */
-  maxTurns: z.number().default(10),
+  /** Max conversation turns per invocation (0 = unlimited) */
+  maxTurns: z.number().default(0),
   /** Max budget in USD per message invocation */
-  maxBudgetPerMessage: z.number().default(0.50),
+  maxBudgetPerMessage: z.number().default(999),
   /** System prompt override (optional) */
   systemPrompt: z.string().optional(),
   /** Path to persona file (optional, e.g. ~/.openclaudecode/persona.md) */
