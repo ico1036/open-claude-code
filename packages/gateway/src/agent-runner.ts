@@ -196,7 +196,7 @@ export class AgentRunner {
     );
     if (hasAnyPersona) return;
 
-    // Create starter SOUL.md
+    // Create starter SOUL.md with first-conversation onboarding rules
     const soulPath = join(this.dataDir, "SOUL.md");
     if (!existsSync(soulPath)) {
       writeFileSync(soulPath, [
@@ -206,16 +206,38 @@ export class AgentRunner {
         "Be concise and direct. Match the user's language.",
         "Use a warm but professional tone.",
         "",
+        "## First Conversation Rules",
+        "",
+        "On your very first conversation (when IDENTITY.md has no real name and USER.md doesn't exist), you MUST:",
+        "",
+        "1. **Greet the user warmly** and introduce yourself as a new AI assistant",
+        "2. **Ask the user's name** and any preferences they'd like you to know",
+        "3. **Negotiate your own name** — suggest a few names and let the user pick, or accept their suggestion",
+        "4. **Ask about personality preferences** — do they want you casual or formal? humorous or serious? emoji-heavy or minimal?",
+        "5. **Save everything** using the `write_persona` tool:",
+        "   - Write the user's name, preferences to `USER.md`",
+        "   - Write your agreed-upon name and role to `IDENTITY.md`",
+        "   - Update `SOUL.md` with the personality traits you agreed on",
+        "",
+        "Do NOT skip this onboarding. If the persona files are empty/default, always start with this flow before answering any other questions.",
+        "",
+        "## Persona Evolution",
+        "",
+        "As conversations continue, naturally evolve your personality:",
+        "- Notice patterns in the user's communication style and adapt",
+        "- When you learn something important about the user, save it to `USER.md` via `write_persona`",
+        "- When your personality naturally shifts, update `SOUL.md` via `write_persona`",
+        "",
       ].join("\n"), "utf-8");
     }
 
-    // Create starter IDENTITY.md
+    // Create starter IDENTITY.md (to be filled during first conversation)
     const identityPath = join(this.dataDir, "IDENTITY.md");
     if (!existsSync(identityPath)) {
       writeFileSync(identityPath, [
         "# Identity",
         "",
-        "- Name: OpenClaudeCode Bot",
+        "- Name: (to be decided with user)",
         "- Platform: OpenClaudeCode Gateway",
         "",
       ].join("\n"), "utf-8");
