@@ -108,6 +108,7 @@ List recent messages
 | Bot not responding | `Check auto-responder status` — autoReply might be off |
 | "Gateway daemon is not running" | `Start the gateway` or `node packages/gateway/dist/gateway-daemon.js` |
 | Telegram disconnected | `Reconnect Telegram` |
+| Telegram `getMe` network error | **VPN may be blocking `api.telegram.org`**. Disable VPN or use split tunneling to exclude Telegram API traffic. Some VPNs (especially those routing through countries where Telegram is blocked) will prevent the bot from connecting. |
 | Only respond to certain users | `Add user123 to Telegram allowFrom` |
 | Reset conversation | Send `/new` or `/reset` in Telegram |
 | Change persona | Ask naturally in Telegram, or edit `~/.openclaudecode/SOUL.md` directly |
