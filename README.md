@@ -246,7 +246,7 @@ agentRunner:
   maxConcurrent: 3
   debounceMs: 1500
   maxTurns: 10
-  maxBudgetPerMessage: 0.50
+  maxBudgetPerMessage: 999  # default: 999 (USD)
 
 channels:
   telegram:
@@ -254,6 +254,8 @@ channels:
     autoReply: true
     allowFrom: []      # empty = allow all users
 ```
+
+> **Note:** `maxBudgetPerMessage` is the per-message cost limit (USD) enforced by the Agent SDK. Claude Code Max subscribers can safely keep the default (`999`) since billing is handled by subscription, not per-token.
 
 ---
 
