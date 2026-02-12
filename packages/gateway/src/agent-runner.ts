@@ -24,6 +24,7 @@ import {
   statSync,
 } from "node:fs";
 import { join, basename } from "node:path";
+import { createHash } from "node:crypto";
 import type { ChannelMessage } from "@open-claude-code/adapter-core";
 import type { ChannelManager } from "./channel-manager.js";
 import type { MessageStore } from "./message-store.js";
@@ -92,7 +93,18 @@ IMPORTANT - Progress reporting:
 - Example: "파일 3개 확인 완료, 이제 수정 시작합니다" or "50% 완료, CSS 작업 중입니다"
 - Send an update at least every 3-5 tool calls during long tasks.
 - Always send a final summary when the task is complete.
-- Never leave the user waiting with no updates for a long time.`;
+- Never leave the user waiting with no updates for a long time.
+
+IMPORTANT - Mandatory memory recall:
+- Before answering questions about prior work, decisions, preferences, or anything discussed in past sessions, you MUST call memory_search first.
+- This ensures continuity across sessions even after gateway restarts.
+- If memory_search returns relevant results, incorporate them into your response.
+
+IMPORTANT - Auto memory capture:
+- When the user shares important facts, preferences, decisions, or asks you to remember something, proactively save it to MEMORY.md using write_persona.
+- When completing a significant task, save a brief summary of what was done to MEMORY.md.
+- Keep MEMORY.md organized by topic, concise, and under 200 lines.
+- Do NOT wait to be asked — capture important context automatically.`;
 
 const RESET_COMMANDS = ["/new", "/reset", "/리셋", "/새로"];
 
@@ -129,6 +141,7 @@ export class AgentRunner {
   private sessionsDir: string;
   private dataDir: string;
   private skillsCache: SkillMeta[] | null = null;
+  private sessionsFile: string; // Disk-backed session store
 
   constructor(
     store: MessageStore,
@@ -156,6 +169,10 @@ export class AgentRunner {
       mkdirSync(this.sessionsDir, { recursive: true });
     }
 
+    // Load persisted sessions from disk
+    this.sessionsFile = join(this.dataDir, "sessions.json");
+    this.loadSessionsFromDisk();
+
     // Ensure persona directory structure
     this.ensurePersonaFiles();
     // Ensure skills directory
@@ -164,6 +181,39 @@ export class AgentRunner {
     this.ensureMemoryDir();
 
     console.log(`[agent-runner] Initialized (model: ${this.config.model}, maxTurns: ${this.config.maxTurns}, budget: $${this.config.maxBudgetPerMessage})`);
+  }
+
+  // ─── Session Persistence ─────────────────────────────────────────────────
+
+  /** Load sessions map from disk (survives gateway restart) */
+  private loadSessionsFromDisk(): void {
+    try {
+      if (existsSync(this.sessionsFile)) {
+        const raw = readFileSync(this.sessionsFile, "utf-8");
+        const data = JSON.parse(raw) as Record<string, string>;
+        for (const [key, sessionId] of Object.entries(data)) {
+          if (typeof key === "string" && typeof sessionId === "string") {
+            this.sessions.set(key, sessionId);
+          }
+        }
+        console.log(`[agent-runner] Restored ${this.sessions.size} session(s) from disk`);
+      }
+    } catch (err) {
+      console.warn(`[agent-runner] Failed to load sessions from disk:`, err);
+    }
+  }
+
+  /** Persist sessions map to disk */
+  private saveSessionsToDisk(): void {
+    try {
+      const data: Record<string, string> = {};
+      for (const [key, sessionId] of this.sessions) {
+        data[key] = sessionId;
+      }
+      writeFileSync(this.sessionsFile, JSON.stringify(data, null, 2), "utf-8");
+    } catch (err) {
+      console.warn(`[agent-runner] Failed to save sessions to disk:`, err);
+    }
   }
 
   // ─── Initialization ──────────────────────────────────────────────────────
@@ -356,6 +406,30 @@ export class AgentRunner {
       ].join("\n");
 
       appendFileSync(logPath, entry, "utf-8");
+    } catch {
+      // non-critical
+    }
+  }
+
+  /** Auto-index conversation exchange into FTS memory for future recall */
+  private indexConversationMemory(key: string, userText: string, result: string): void {
+    try {
+      if (result !== "success" && result !== "unknown") return;
+      const text = userText.trim();
+      if (!text || text.length < 10) return; // skip trivial messages
+
+      const id = createHash("sha256")
+        .update(text + key + Date.now())
+        .digest("hex")
+        .slice(0, 16);
+
+      this.memoryManager.indexChunk({
+        id,
+        sessionKey: key,
+        text: `User: ${text.slice(0, 500)}`,
+        source: "session",
+        timestamp: Date.now(),
+      });
     } catch {
       // non-critical
     }
@@ -700,6 +774,7 @@ Be concise - code speaks louder than comments.`,
     for (const m of messages) {
       if (this.isResetCommand(m.text)) {
         this.sessions.delete(key);
+        this.saveSessionsToDisk();
         console.log(`[agent-runner] Session reset for ${key}`);
         return;
       }
@@ -821,9 +896,13 @@ Be concise - code speaks louder than comments.`,
       let lastToolUsed = "";
 
       for await (const msg of q) {
-        // Capture session ID for resume
+        // Capture session ID for resume (persist to disk)
         if ("session_id" in msg && msg.session_id) {
+          const prev = this.sessions.get(key);
           this.sessions.set(key, msg.session_id);
+          if (prev !== msg.session_id) {
+            this.saveSessionsToDisk();
+          }
         }
 
         // Refresh typing on assistant activity
@@ -876,6 +955,9 @@ Be concise - code speaks louder than comments.`,
 
       // Daily log
       this.appendDailyLog(key, messageTexts.slice(0, 300), resultSubtype);
+
+      // Auto-index conversation into memory for future recall
+      this.indexConversationMemory(key, messageTexts, resultSubtype);
 
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
