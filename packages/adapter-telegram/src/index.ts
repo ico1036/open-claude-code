@@ -8,6 +8,8 @@ import {
   type OutboundMessage,
   type SendResult,
 } from "@open-claude-code/adapter-core";
+import { markdownToTelegramHtml } from "./format.js";
+import { chunkMarkdown } from "./chunk.js";
 
 export class TelegramAdapter extends ChannelAdapter {
   readonly id = "telegram";
@@ -144,6 +146,9 @@ export class TelegramAdapter extends ChannelAdapter {
     }
   }
 
+  /** Telegram HTML parse error pattern — triggers plain-text fallback */
+  private static PARSE_ERR_RE = /can't parse entities|parse entities|find end of the entity/i;
+
   async send(msg: OutboundMessage): Promise<SendResult> {
     if (!this.bot) {
       return { success: false, error: "Bot not started", timestamp: Date.now() };
@@ -153,17 +158,22 @@ export class TelegramAdapter extends ChannelAdapter {
       const chatId = msg.to;
 
       if (msg.text) {
-        const params: Record<string, unknown> = {};
-        if (msg.replyToId) {
-          params.reply_parameters = { message_id: parseInt(msg.replyToId, 10) };
+        const replyParams = msg.replyToId
+          ? { reply_parameters: { message_id: parseInt(msg.replyToId, 10) } }
+          : {};
+
+        // Chunk markdown then convert each chunk to Telegram HTML
+        const chunks = chunkMarkdown(msg.text);
+        let lastResult: SendResult = { success: false, error: "No chunks", timestamp: Date.now() };
+
+        for (let i = 0; i < chunks.length; i++) {
+          // Only quote-reply the first chunk
+          const params = i === 0 ? replyParams : {};
+          lastResult = await this.sendFormatted(chatId, chunks[i], params);
+          if (!lastResult.success) return lastResult;
         }
 
-        const result = await this.bot.api.sendMessage(chatId, msg.text, params);
-        return {
-          success: true,
-          messageId: String(result.message_id),
-          timestamp: result.date * 1000,
-        };
+        return lastResult;
       }
 
       return { success: false, error: "No content to send", timestamp: Date.now() };
@@ -173,6 +183,52 @@ export class TelegramAdapter extends ChannelAdapter {
         error: err instanceof Error ? err.message : String(err),
         timestamp: Date.now(),
       };
+    }
+  }
+
+  /**
+   * Send a single Markdown chunk as Telegram HTML, with plain-text fallback.
+   */
+  private async sendFormatted(
+    chatId: string,
+    markdown: string,
+    extraParams: Record<string, unknown>,
+  ): Promise<SendResult> {
+    // Attempt HTML delivery
+    try {
+      const html = markdownToTelegramHtml(markdown);
+      const result = await this.bot!.api.sendMessage(chatId, html, {
+        ...extraParams,
+        parse_mode: "HTML",
+      });
+      return {
+        success: true,
+        messageId: String(result.message_id),
+        timestamp: result.date * 1000,
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+
+      // Fallback: if Telegram can't parse our HTML, send as plain text
+      if (TelegramAdapter.PARSE_ERR_RE.test(errMsg)) {
+        console.warn(`[telegram] HTML parse failed, falling back to plain text: ${errMsg}`);
+        try {
+          const result = await this.bot!.api.sendMessage(chatId, markdown, extraParams);
+          return {
+            success: true,
+            messageId: String(result.message_id),
+            timestamp: result.date * 1000,
+          };
+        } catch (fallbackErr) {
+          return {
+            success: false,
+            error: fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr),
+            timestamp: Date.now(),
+          };
+        }
+      }
+
+      return { success: false, error: errMsg, timestamp: Date.now() };
     }
   }
 }
