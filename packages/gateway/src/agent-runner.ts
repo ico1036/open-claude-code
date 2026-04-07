@@ -383,9 +383,9 @@ export class AgentRunner {
 
   private ensureMemoryDir(): void {
     const memDir = join(this.dataDir, "memory");
-    if (!existsSync(memDir)) {
-      mkdirSync(memDir, { recursive: true });
-    }
+    if (!existsSync(memDir)) mkdirSync(memDir, { recursive: true });
+    const channelsDir = join(memDir, "channels");
+    if (!existsSync(channelsDir)) mkdirSync(channelsDir, { recursive: true });
     // Create MEMORY.md if it doesn't exist
     const memPath = join(this.dataDir, "MEMORY.md");
     if (!existsSync(memPath)) {
@@ -405,7 +405,7 @@ export class AgentRunner {
   // ─── Persona System ──────────────────────────────────────────────────────
 
   /** Load multi-file persona: SOUL.md + IDENTITY.md + USER.md + AGENTS.md */
-  private loadPersona(): string {
+  private loadPersona(channelKey?: string): string {
     const parts: string[] = [];
 
     // 1. Base system prompt
@@ -433,8 +433,8 @@ export class AgentRunner {
       }
     }
 
-    // 3. Load long-term memory
-    const memoryContent = this.loadMemory();
+    // 3. Load long-term memory (multi-tier)
+    const memoryContent = this.loadMemory(channelKey);
     if (memoryContent) {
       parts.push(`\n## Long-term Memory\n${memoryContent}`);
     }
@@ -457,13 +457,29 @@ export class AgentRunner {
 
   // ─── Memory System ───────────────────────────────────────────────────────
 
-  /** Load MEMORY.md for long-term context */
-  private loadMemory(): string | null {
-    const memPath = join(this.dataDir, "MEMORY.md");
-    if (!existsSync(memPath)) return null;
+  /** Load memory from all tiers: user (global) + channel-specific */
+  private loadMemory(channelKey?: string): string | null {
+    const parts: string[] = [];
+
+    // Tier 1: User-scope (global MEMORY.md)
+    const userMem = this.loadMemoryFile(join(this.dataDir, "MEMORY.md"));
+    if (userMem) parts.push(`### Global\n${userMem}`);
+
+    // Tier 2: Channel-scope (per-channel memory)
+    if (channelKey) {
+      const channelMemDir = join(this.dataDir, "memory", "channels", channelKey);
+      const channelMem = this.loadMemoryFile(join(channelMemDir, "MEMORY.md"));
+      if (channelMem) parts.push(`### Channel (${channelKey})\n${channelMem}`);
+    }
+
+    return parts.length > 0 ? parts.join("\n\n") : null;
+  }
+
+  /** Load a single memory file with line cap */
+  private loadMemoryFile(path: string): string | null {
+    if (!existsSync(path)) return null;
     try {
-      const content = readFileSync(memPath, "utf-8").trim();
-      // Limit to ~200 lines to avoid context bloat
+      const content = readFileSync(path, "utf-8").trim();
       const lines = content.split("\n");
       return lines.length > 200 ? lines.slice(0, 200).join("\n") + "\n...(truncated)" : content;
     } catch {
@@ -939,7 +955,7 @@ Be concise - code speaks louder than comments.`,
       // --- Start typing ---
       await typing.start();
 
-      const systemPrompt = this.loadPersona();
+      const systemPrompt = this.loadPersona(key);
       const subagents = this.buildSubagents();
       const hooks = this.buildHooks();
       const hasSubagents = Object.keys(subagents).length > 0;

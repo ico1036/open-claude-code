@@ -8,7 +8,7 @@
 
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { MessageRouter } from "./message-router.js";
 import type { MessageStore } from "./message-store.js";
@@ -61,6 +61,16 @@ export type AgentMcpDeps = {
 
 /** Valid persona file names that the agent can read/write */
 const PERSONA_FILES = ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "MEMORY.md"] as const;
+
+/** Resolve file path based on memory scope */
+function resolveMemoryPath(dataDir: string, file: string, scope: "user" | "channel", conversationKey?: string): string {
+  if (scope === "channel" && conversationKey) {
+    // Sanitize key for filesystem (replace : with -)
+    const safeKey = conversationKey.replace(/[:/\\]/g, "-");
+    return join(dataDir, "memory", "channels", safeKey, file);
+  }
+  return join(dataDir, file);
+}
 
 /** Max message length per chunk (Telegram limit is 4096) */
 const MAX_CHUNK_LENGTH = 4000;
@@ -240,9 +250,10 @@ export function createAgentMcpServer(deps: AgentMcpDeps) {
 
       tool(
         "read_persona",
-        "Read a persona or memory file. Use this to check your current personality, identity, user info, or long-term memory. Valid files: SOUL.md, IDENTITY.md, USER.md, AGENTS.md, MEMORY.md",
+        "Read a persona or memory file. Scope: 'user' (global, default) or 'channel' (per-conversation). Valid files: SOUL.md, IDENTITY.md, USER.md, AGENTS.md, MEMORY.md",
         {
           file: z.string().describe("File name to read: SOUL.md, IDENTITY.md, USER.md, AGENTS.md, or MEMORY.md"),
+          scope: z.enum(["user", "channel"]).optional().describe("Memory scope: 'user' (global, default) or 'channel' (per-conversation)"),
         },
         async (args) => {
           if (!PERSONA_FILES.includes(args.file as typeof PERSONA_FILES[number])) {
@@ -250,10 +261,10 @@ export function createAgentMcpServer(deps: AgentMcpDeps) {
               content: [{ type: "text", text: `Invalid file. Must be one of: ${PERSONA_FILES.join(", ")}` }],
             };
           }
-          const filePath = join(dataDir, args.file);
+          const filePath = resolveMemoryPath(dataDir, args.file, args.scope ?? "user", deps.conversationKey);
           if (!existsSync(filePath)) {
             return {
-              content: [{ type: "text", text: `File ${args.file} does not exist yet. Use write_persona to create it.` }],
+              content: [{ type: "text", text: `File ${args.file} does not exist yet (scope: ${args.scope ?? "user"}). Use write_persona to create it.` }],
             };
           }
           const content = readFileSync(filePath, "utf-8");
@@ -265,10 +276,11 @@ export function createAgentMcpServer(deps: AgentMcpDeps) {
 
       tool(
         "write_persona",
-        "Write or update a persona or memory file. Use this to save user preferences, update your identity/personality, or store important facts in long-term memory. The content will take effect from the next conversation turn. Valid files: SOUL.md, IDENTITY.md, USER.md, AGENTS.md, MEMORY.md",
+        "Write or update a persona or memory file. Scope: 'user' (global, default) or 'channel' (per-conversation). Use 'channel' scope to store conversation-specific preferences. Valid files: SOUL.md, IDENTITY.md, USER.md, AGENTS.md, MEMORY.md",
         {
           file: z.string().describe("File name to write: SOUL.md, IDENTITY.md, USER.md, AGENTS.md, or MEMORY.md"),
           content: z.string().describe("Full content to write to the file (replaces existing content)"),
+          scope: z.enum(["user", "channel"]).optional().describe("Memory scope: 'user' (global, default) or 'channel' (per-conversation)"),
         },
         async (args) => {
           if (!PERSONA_FILES.includes(args.file as typeof PERSONA_FILES[number])) {
@@ -276,10 +288,13 @@ export function createAgentMcpServer(deps: AgentMcpDeps) {
               content: [{ type: "text", text: `Invalid file. Must be one of: ${PERSONA_FILES.join(", ")}` }],
             };
           }
-          const filePath = join(dataDir, args.file);
+          const filePath = resolveMemoryPath(dataDir, args.file, args.scope ?? "user", deps.conversationKey);
+          // Ensure parent directory exists for channel-scoped files
+          const dir = filePath.substring(0, filePath.lastIndexOf("/"));
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
           writeFileSync(filePath, args.content, "utf-8");
           return {
-            content: [{ type: "text", text: `Successfully updated ${args.file}` }],
+            content: [{ type: "text", text: `Successfully updated ${args.file} (scope: ${args.scope ?? "user"})` }],
           };
         },
       ),
