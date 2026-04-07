@@ -83,6 +83,15 @@ type SubagentDef = {
   model?: AgentModel;
 };
 
+type SessionEntry = {
+  sessionId: string;
+  updatedAt: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCostUsd: number;
+  turnCount: number;
+};
+
 type SpawnedTask = {
   taskId: string;
   parentKey: string;
@@ -166,7 +175,7 @@ export class AgentRunner {
   private channelManager: ChannelManager | null = null;
   private memoryManager: MemoryManager;
   private messageRouter: MessageRouter | null = null;
-  private sessions = new Map<string, { sessionId: string; updatedAt: number }>(); // convKey → session entry
+  private sessions = new Map<string, SessionEntry>(); // convKey → session entry
   private queues = new Map<string, QueueEntry[]>();
   private activeSessions = new Set<string>();
   private inProcessMcp: ReturnType<typeof createAgentMcpServer> | null = null;
@@ -231,12 +240,16 @@ export class AgentRunner {
         for (const [key, val] of Object.entries(data)) {
           if (typeof val === "string") {
             // Backward compat: old format was just sessionId string
-            this.sessions.set(key, { sessionId: val, updatedAt: Date.now() });
+            this.sessions.set(key, { sessionId: val, updatedAt: Date.now(), totalInputTokens: 0, totalOutputTokens: 0, totalCostUsd: 0, turnCount: 0 });
           } else if (val && typeof val === "object" && "sessionId" in val) {
-            const entry = val as { sessionId: string; updatedAt?: number };
+            const entry = val as Partial<SessionEntry> & { sessionId: string };
             this.sessions.set(key, {
               sessionId: entry.sessionId,
               updatedAt: entry.updatedAt ?? Date.now(),
+              totalInputTokens: entry.totalInputTokens ?? 0,
+              totalOutputTokens: entry.totalOutputTokens ?? 0,
+              totalCostUsd: entry.totalCostUsd ?? 0,
+              turnCount: entry.turnCount ?? 0,
             });
           }
         }
@@ -971,7 +984,15 @@ Be concise - code speaks louder than comments.`,
         if ("session_id" in msg && msg.session_id) {
           const prev = this.sessions.get(key);
           const now = Date.now();
-          this.sessions.set(key, { sessionId: msg.session_id, updatedAt: now });
+          const updated: SessionEntry = {
+            sessionId: msg.session_id,
+            updatedAt: now,
+            totalInputTokens: prev?.totalInputTokens ?? 0,
+            totalOutputTokens: prev?.totalOutputTokens ?? 0,
+            totalCostUsd: prev?.totalCostUsd ?? 0,
+            turnCount: prev?.turnCount ?? 0,
+          };
+          this.sessions.set(key, updated);
           if (prev?.sessionId !== msg.session_id) {
             this.saveSessionsToDisk();
           }
@@ -992,13 +1013,30 @@ Be concise - code speaks louder than comments.`,
           }
         }
 
-        // Track costs from result
+        // Track costs and token usage from result
         if (msg.type === "result") {
           resultSubtype = msg.subtype;
-          const resultMsg = msg as { usage?: { total_cost_usd?: number }; subtype: string };
+          const resultMsg = msg as {
+            usage?: { total_cost_usd?: number; input_tokens?: number; output_tokens?: number };
+            subtype: string;
+          };
           const cost = resultMsg.usage?.total_cost_usd ?? 0;
+          const inputTokens = resultMsg.usage?.input_tokens ?? 0;
+          const outputTokens = resultMsg.usage?.output_tokens ?? 0;
+
+          // Accumulate token stats in session entry
+          const entry = this.sessions.get(key);
+          if (entry) {
+            entry.totalInputTokens += inputTokens;
+            entry.totalOutputTokens += outputTokens;
+            entry.totalCostUsd += cost;
+            entry.turnCount += turnCount;
+            entry.updatedAt = Date.now();
+            this.saveSessionsToDisk();
+          }
+
           if (msg.subtype === "success") {
-            console.log(`[agent-runner] Session ${key} completed. turns=${turnCount}, cost=$${cost.toFixed(4)}, sent=${tracker.getSentCount()}`);
+            console.log(`[agent-runner] Session ${key} completed. turns=${turnCount}, cost=$${cost.toFixed(4)}, tokens=${inputTokens}+${outputTokens}, sent=${tracker.getSentCount()}`);
           } else {
             console.error(`[agent-runner] Session ${key} ended: ${msg.subtype} | turns=${turnCount}, cost=$${cost.toFixed(4)}, sent=${tracker.getSentCount()}, lastTool=${lastToolUsed}`);
           }
@@ -1025,6 +1063,9 @@ Be concise - code speaks louder than comments.`,
       // --- 8. Dispatch idle ---
       typing.markDispatchIdle();
 
+      // --- 9. Memory flush check ---
+      await this.maybeFlushMemory(key);
+
       // Daily log
       this.appendDailyLog(key, messageTexts.slice(0, 300), resultSubtype);
 
@@ -1043,6 +1084,79 @@ Be concise - code speaks louder than comments.`,
       // --- 9. Cleanup ---
       typing.cleanup();
       this.mcpDeps?.messageSentHandlers.delete(handlerKey);
+    }
+  }
+
+  // ─── Memory Flush ──────────────────────────────────────────────────────
+
+  /** Context window threshold for triggering memory flush (80% of 200k) */
+  private static readonly FLUSH_TOKEN_THRESHOLD = 160_000;
+  /** Track which sessions have already been flushed this lifecycle */
+  private flushedSessions = new Set<string>();
+
+  /**
+   * When total tokens in a session approach the context window limit,
+   * trigger a special query that saves important context to MEMORY.md
+   * before the next compaction wipes it.
+   */
+  private async maybeFlushMemory(key: string): Promise<void> {
+    const entry = this.sessions.get(key);
+    if (!entry) return;
+
+    const totalTokens = entry.totalInputTokens + entry.totalOutputTokens;
+    if (totalTokens < AgentRunner.FLUSH_TOKEN_THRESHOLD) return;
+    if (this.flushedSessions.has(key)) return; // already flushed this cycle
+
+    console.log(`[agent-runner] Token threshold reached for ${key} (${totalTokens} tokens), triggering memory flush`);
+    this.flushedSessions.add(key);
+
+    try {
+      const flushPrompt = [
+        "SYSTEM: Context window is approaching its limit. Before your conversation history is compacted,",
+        "review the current conversation and save any important information that should be preserved.",
+        "",
+        "Use the write_persona tool to update MEMORY.md with:",
+        "- Key decisions or conclusions reached",
+        "- Important user preferences or requests discovered",
+        "- Task outcomes or status updates",
+        "- Any context that would be needed to continue this conversation later",
+        "",
+        "Be concise — MEMORY.md has a 200-line cap. Update existing entries rather than duplicating.",
+        "After saving, briefly confirm what you preserved.",
+      ].join("\n");
+
+      const flushQ = query({
+        prompt: flushPrompt,
+        options: {
+          model: this.config.model,
+          systemPrompt: { type: "preset", preset: "claude_code", append: "You are performing a memory flush. Save important context concisely." },
+          resume: entry.sessionId,
+          permissionMode: "bypassPermissions",
+          allowDangerouslySkipPermissions: true,
+          cwd: this.sessionsDir,
+          mcpServers: { gateway: this.inProcessMcp! },
+          allowedTools: [
+            "mcp__gateway__read_persona",
+            "mcp__gateway__write_persona",
+            "mcp__gateway__memory_search",
+          ],
+          maxTurns: 3,
+          maxBudgetUsd: 1,
+          abortController: new AbortController(),
+        },
+      });
+
+      for await (const msg of flushQ) {
+        if ("session_id" in msg && msg.session_id) {
+          entry.sessionId = msg.session_id;
+          entry.updatedAt = Date.now();
+          this.saveSessionsToDisk();
+        }
+      }
+
+      console.log(`[agent-runner] Memory flush completed for ${key}`);
+    } catch (err) {
+      console.error(`[agent-runner] Memory flush failed for ${key}:`, err);
     }
   }
 
