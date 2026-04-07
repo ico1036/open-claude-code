@@ -52,6 +52,7 @@ async function main() {
     personaFile: agentRunnerConfig.personaFile,
     maxChildrenPerSession: agentRunnerConfig.maxChildrenPerSession,
     taskTimeoutSeconds: agentRunnerConfig.taskTimeoutSeconds,
+    sessionIdleMs: (agentRunnerConfig.sessionIdleMinutes ?? 120) * 60 * 1000,
   });
 
   console.log(`[gateway] Agent runner: ${agentRunnerConfig.enabled ? "enabled" : "disabled"} (model: ${agentRunnerConfig.model})`);

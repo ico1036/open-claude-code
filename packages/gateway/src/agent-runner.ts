@@ -58,6 +58,8 @@ export type AgentRunnerConfig = {
   maxChildrenPerSession?: number;
   /** Auto-abort timeout for spawned tasks in seconds */
   taskTimeoutSeconds?: number;
+  /** Session idle timeout in ms (0 = never expire, default: 2h) */
+  sessionIdleMs?: number;
 };
 
 type QueueEntry = {
@@ -164,7 +166,7 @@ export class AgentRunner {
   private channelManager: ChannelManager | null = null;
   private memoryManager: MemoryManager;
   private messageRouter: MessageRouter | null = null;
-  private sessions = new Map<string, string>(); // convKey → sessionId
+  private sessions = new Map<string, { sessionId: string; updatedAt: number }>(); // convKey → session entry
   private queues = new Map<string, QueueEntry[]>();
   private activeSessions = new Set<string>();
   private inProcessMcp: ReturnType<typeof createAgentMcpServer> | null = null;
@@ -195,6 +197,7 @@ export class AgentRunner {
       enableSubagents: true,
       maxChildrenPerSession: 3,
       taskTimeoutSeconds: 300,
+      sessionIdleMs: 2 * 60 * 60 * 1000, // 2 hours
       ...config,
     };
 
@@ -224,10 +227,17 @@ export class AgentRunner {
     try {
       if (existsSync(this.sessionsFile)) {
         const raw = readFileSync(this.sessionsFile, "utf-8");
-        const data = JSON.parse(raw) as Record<string, string>;
-        for (const [key, sessionId] of Object.entries(data)) {
-          if (typeof key === "string" && typeof sessionId === "string") {
-            this.sessions.set(key, sessionId);
+        const data = JSON.parse(raw) as Record<string, unknown>;
+        for (const [key, val] of Object.entries(data)) {
+          if (typeof val === "string") {
+            // Backward compat: old format was just sessionId string
+            this.sessions.set(key, { sessionId: val, updatedAt: Date.now() });
+          } else if (val && typeof val === "object" && "sessionId" in val) {
+            const entry = val as { sessionId: string; updatedAt?: number };
+            this.sessions.set(key, {
+              sessionId: entry.sessionId,
+              updatedAt: entry.updatedAt ?? Date.now(),
+            });
           }
         }
         console.log(`[agent-runner] Restored ${this.sessions.size} session(s) from disk`);
@@ -240,14 +250,23 @@ export class AgentRunner {
   /** Persist sessions map to disk */
   private saveSessionsToDisk(): void {
     try {
-      const data: Record<string, string> = {};
-      for (const [key, sessionId] of this.sessions) {
-        data[key] = sessionId;
+      const data: Record<string, { sessionId: string; updatedAt: number }> = {};
+      for (const [key, entry] of this.sessions) {
+        data[key] = entry;
       }
       writeFileSync(this.sessionsFile, JSON.stringify(data, null, 2), "utf-8");
     } catch (err) {
       console.warn(`[agent-runner] Failed to save sessions to disk:`, err);
     }
+  }
+
+  /** Check if a session is stale (idle too long) */
+  private isSessionStale(key: string): boolean {
+    const idleMs = this.config.sessionIdleMs ?? 0;
+    if (idleMs <= 0) return false;
+    const entry = this.sessions.get(key);
+    if (!entry) return false;
+    return Date.now() - entry.updatedAt > idleMs;
   }
 
   // ─── Initialization ──────────────────────────────────────────────────────
@@ -879,7 +898,16 @@ Be concise - code speaks louder than comments.`,
     };
 
     const abortController = new AbortController();
-    const sessionId = this.sessions.get(key);
+
+    // Check session freshness — expire stale sessions
+    if (this.isSessionStale(key)) {
+      const idleMin = Math.round((this.config.sessionIdleMs ?? 0) / 60000);
+      console.log(`[agent-runner] Session ${key} expired (idle > ${idleMin}m), starting fresh`);
+      this.sessions.delete(key);
+      this.saveSessionsToDisk();
+    }
+    const sessionEntry = this.sessions.get(key);
+    const sessionId = sessionEntry?.sessionId;
 
     try {
       // --- Start typing ---
@@ -942,8 +970,9 @@ Be concise - code speaks louder than comments.`,
         // Capture session ID for resume (persist to disk)
         if ("session_id" in msg && msg.session_id) {
           const prev = this.sessions.get(key);
-          this.sessions.set(key, msg.session_id);
-          if (prev !== msg.session_id) {
+          const now = Date.now();
+          this.sessions.set(key, { sessionId: msg.session_id, updatedAt: now });
+          if (prev?.sessionId !== msg.session_id) {
             this.saveSessionsToDisk();
           }
         }

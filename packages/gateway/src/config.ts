@@ -32,6 +32,8 @@ const AgentRunnerConfigSchema = z.object({
   maxChildrenPerSession: z.number().default(3),
   /** Auto-abort timeout for spawned tasks in seconds */
   taskTimeoutSeconds: z.number().default(300),
+  /** Session idle timeout in minutes (0 = never expire, default: 120 = 2h) */
+  sessionIdleMinutes: z.number().default(120),
   /** System prompt override (optional) */
   systemPrompt: z.string().optional(),
   /** Path to persona file (optional, e.g. ~/.openclaudecode/persona.md) */
