@@ -181,6 +181,7 @@ export class AgentRunner {
   private inProcessMcp: ReturnType<typeof createAgentMcpServer> | null = null;
   private mcpDeps: AgentMcpDeps | null = null;
   private spawnedTasks = new Map<string, SpawnedTask>();
+  private lastMessageAt = new Map<string, number>(); // convKey → last message timestamp
   private sessionsDir: string;
   private dataDir: string;
   private skillsCache: SkillMeta[] | null = null;
@@ -271,6 +272,18 @@ export class AgentRunner {
     } catch (err) {
       console.warn(`[agent-runner] Failed to save sessions to disk:`, err);
     }
+  }
+
+  /** Format elapsed time compactly: +10s, +5m, +2h, +1d */
+  private formatElapsed(ms: number): string {
+    const sec = Math.floor(ms / 1000);
+    if (sec < 60) return `${sec}s`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h`;
+    const days = Math.floor(hr / 24);
+    return `${days}d`;
   }
 
   /** Check if a session is stale (idle too long) */
@@ -847,28 +860,28 @@ Be concise - code speaks louder than comments.`,
       }
     }
 
-    // Build prompt
-    const senderLabel = lastMsg.from.name
-      ? `${lastMsg.from.name} (${lastMsg.from.id})`
-      : lastMsg.from.id;
+    // Build prompt with compact envelope format
+    const senderName = lastMsg.from.name ?? lastMsg.from.id;
+    const replyTo = lastMsg.chatType === "dm" ? lastMsg.from.id : (lastMsg.to?.id ?? lastMsg.from.id);
 
     const messageTexts = messages
       .map((m) => m.text ?? "(media/attachment)")
       .join("\n");
 
-    const replyTo = lastMsg.chatType === "dm" ? lastMsg.from.id : (lastMsg.to?.id ?? lastMsg.from.id);
+    // Elapsed time since last message in this conversation
+    const prevTs = this.lastMessageAt.get(key);
+    const elapsed = prevTs ? this.formatElapsed(lastMsg.timestamp - prevTs) : "new";
+    this.lastMessageAt.set(key, lastMsg.timestamp);
+
+    const chatLabel = lastMsg.to?.name
+      ? ` in ${lastMsg.to.name}`
+      : lastMsg.chatType === "dm" ? "" : ` ${lastMsg.chatType}`;
 
     const userPrompt = [
-      `## Incoming message`,
-      `- **Channel**: ${lastMsg.channel}`,
-      `- **From**: ${senderLabel}`,
-      `- **Chat type**: ${lastMsg.chatType}${lastMsg.to?.name ? ` in ${lastMsg.to.name}` : lastMsg.chatType === "dm" ? " in DM" : ""}`,
-      `- **Time**: ${new Date(lastMsg.timestamp).toISOString()}`,
-      "",
-      `**Message:**`,
+      `[${lastMsg.channel} ${senderName} +${elapsed}${chatLabel}]`,
       messageTexts,
       "",
-      `Reply using the send_message tool with channel="${lastMsg.channel}" and to="${replyTo}".`,
+      `Reply: send_message channel="${lastMsg.channel}" to="${replyTo}"`,
     ].join("\n");
 
     console.log(`[agent-runner] Invoking agent for ${key} (${messages.length} message(s))`);
