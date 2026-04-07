@@ -149,6 +149,7 @@ IMPORTANT - Task delegation:
 - Available agents: "coder" (code tasks), "researcher" (web research), "translator" (translation), plus any custom agents from AGENTS.md.`;
 
 const RESET_COMMANDS = ["/new", "/reset", "/리셋", "/새로"];
+const INTERRUPT_COMMANDS = ["/stop", "/cancel", "/중지", "/취소", "됐어", "그만"];
 
 /** Error fallback messages by Agent SDK result subtype */
 const ERROR_FALLBACK: Record<string, string> = {
@@ -182,6 +183,7 @@ export class AgentRunner {
   private mcpDeps: AgentMcpDeps | null = null;
   private spawnedTasks = new Map<string, SpawnedTask>();
   private lastMessageAt = new Map<string, number>(); // convKey → last message timestamp
+  private activeAbortControllers = new Map<string, AbortController>(); // convKey → abort controller
   private sessionsDir: string;
   private dataDir: string;
   private skillsCache: SkillMeta[] | null = null;
@@ -793,11 +795,32 @@ Be concise - code speaks louder than comments.`,
     return true;
   }
 
+  private isInterruptCommand(text: string | undefined): boolean {
+    if (!text) return false;
+    const trimmed = text.trim().toLowerCase();
+    return INTERRUPT_COMMANDS.some((cmd) => trimmed === cmd || trimmed.startsWith(cmd + " "));
+  }
+
   /** Handle an incoming message */
   handleMessage(msg: ChannelMessage): void {
     if (!this.shouldRespond(msg)) return;
 
     const key = this.getConversationKey(msg);
+
+    // Check for interrupt commands — abort active session immediately
+    if (this.isInterruptCommand(msg.text)) {
+      const controller = this.activeAbortControllers.get(key);
+      if (controller) {
+        console.log(`[agent-runner] Interrupt command received for ${key}, aborting active session`);
+        controller.abort();
+        // Clear queue so interrupted message doesn't get re-processed
+        this.queues.delete(key);
+        // Notify user
+        const replyTo = msg.chatType === "dm" ? msg.from.id : (msg.to?.id ?? msg.from.id);
+        this.messageRouter?.send(msg.channel, { to: replyTo, text: "중지했습니다." }, msg.accountId ?? "default").catch(() => {});
+        return;
+      }
+    }
 
     if (!this.queues.has(key)) {
       this.queues.set(key, []);
@@ -940,6 +963,7 @@ Be concise - code speaks louder than comments.`,
     };
 
     const abortController = new AbortController();
+    this.activeAbortControllers.set(key, abortController);
 
     // Check session freshness — expire stale sessions
     if (this.isSessionStale(key)) {
@@ -1110,9 +1134,10 @@ Be concise - code speaks louder than comments.`,
         await sendFallback(DEFAULT_ERROR);
       }
     } finally {
-      // --- 9. Cleanup ---
+      // --- 10. Cleanup ---
       typing.cleanup();
       this.mcpDeps?.messageSentHandlers.delete(handlerKey);
+      this.activeAbortControllers.delete(key);
     }
   }
 
