@@ -28,6 +28,10 @@ const AgentRunnerConfigSchema = z.object({
   maxTurns: z.number().default(0),
   /** Max budget in USD per message invocation */
   maxBudgetPerMessage: z.number().default(999),
+  /** Max spawned sub-tasks per conversation (0 = disabled) */
+  maxChildrenPerSession: z.number().default(3),
+  /** Auto-abort timeout for spawned tasks in seconds */
+  taskTimeoutSeconds: z.number().default(300),
   /** System prompt override (optional) */
   systemPrompt: z.string().optional(),
   /** Path to persona file (optional, e.g. ~/.openclaudecode/persona.md) */

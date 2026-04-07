@@ -54,6 +54,10 @@ export type AgentRunnerConfig = {
   enableSubagents?: boolean;
   /** Skills directory override */
   skillsDir?: string;
+  /** Max spawned sub-tasks per conversation (0 = disabled) */
+  maxChildrenPerSession?: number;
+  /** Auto-abort timeout for spawned tasks in seconds */
+  taskTimeoutSeconds?: number;
 };
 
 type QueueEntry = {
@@ -75,6 +79,25 @@ type SubagentDef = {
   prompt: string;
   tools?: string[];
   model?: AgentModel;
+};
+
+type SpawnedTask = {
+  taskId: string;
+  parentKey: string;
+  agent: string;
+  task: string;
+  status: "queued" | "running" | "completed" | "failed";
+  announce: boolean;
+  channel: string;
+  replyTo: string;
+  accountId: string;
+  startedAt: number;
+  completedAt?: number;
+  result?: string;
+  error?: string;
+  cost?: number;
+  abortController?: AbortController;
+  timeoutTimer?: ReturnType<typeof setTimeout>;
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -104,7 +127,15 @@ IMPORTANT - Auto memory capture:
 - When the user shares important facts, preferences, decisions, or asks you to remember something, proactively save it to MEMORY.md using write_persona.
 - When completing a significant task, save a brief summary of what was done to MEMORY.md.
 - Keep MEMORY.md organized by topic, concise, and under 200 lines.
-- Do NOT wait to be asked — capture important context automatically.`;
+- Do NOT wait to be asked — capture important context automatically.
+
+IMPORTANT - Task delegation:
+- For tasks that will take many steps (file analysis, refactoring, research, web lookups), use spawn_task to delegate to a background sub-agent.
+- spawn_task returns immediately — you can keep chatting with the user while the task runs.
+- After spawning, tell the user what you delegated and that they can keep chatting with you.
+- For simple questions, greetings, or quick responses, reply directly — don't over-delegate.
+- Use task_status to check on running tasks if the user asks about progress.
+- Available agents: "coder" (code tasks), "researcher" (web research), "translator" (translation), plus any custom agents from AGENTS.md.`;
 
 const RESET_COMMANDS = ["/new", "/reset", "/리셋", "/새로"];
 
@@ -138,6 +169,7 @@ export class AgentRunner {
   private activeSessions = new Set<string>();
   private inProcessMcp: ReturnType<typeof createAgentMcpServer> | null = null;
   private mcpDeps: AgentMcpDeps | null = null;
+  private spawnedTasks = new Map<string, SpawnedTask>();
   private sessionsDir: string;
   private dataDir: string;
   private skillsCache: SkillMeta[] | null = null;
@@ -161,6 +193,8 @@ export class AgentRunner {
       maxMessageLength: 4000,
       bannedPatterns: [],
       enableSubagents: true,
+      maxChildrenPerSession: 3,
+      taskTimeoutSeconds: 300,
       ...config,
     };
 
@@ -229,12 +263,13 @@ export class AgentRunner {
       memoryManager: this.memoryManager,
       dataDir: this.dataDir,
       messageSentHandlers: new Map(),
+      taskSpawner: this,
     };
     this.mcpDeps = deps;
     this.inProcessMcp = createAgentMcpServer(deps);
 
     const skillCount = this.loadSkills().length;
-    console.log(`[agent-runner] In-process MCP server created with 7 tools`);
+    console.log(`[agent-runner] In-process MCP server created with 9 tools`);
     console.log(`[agent-runner] Loaded ${skillCount} skill(s)`);
     console.log(`[agent-runner] Persona files: ${this.getPersonaStatus()}`);
   }
@@ -817,6 +852,12 @@ Be concise - code speaks louder than comments.`,
     // --- 2. ReplyTracker ---
     const tracker = createReplyTracker();
 
+    // --- 2b. Set conversation context on MCP deps for spawn_task ---
+    this.mcpDeps.conversationKey = key;
+    this.mcpDeps.currentChannel = lastMsg.channel;
+    this.mcpDeps.currentReplyTo = replyTo;
+    this.mcpDeps.currentAccountId = lastMsg.accountId ?? "default";
+
     // --- 3. Register messageSentHandlers callback ---
     const handlerKey = `${lastMsg.channel}:${replyTo}`;
     this.mcpDeps.messageSentHandlers.set(handlerKey, () => {
@@ -858,6 +899,8 @@ Be concise - code speaks louder than comments.`,
         "mcp__gateway__memory_stats",
         "mcp__gateway__read_persona",
         "mcp__gateway__write_persona",
+        "mcp__gateway__spawn_task",
+        "mcp__gateway__task_status",
       ];
       if (hasSubagents) {
         allowedTools.push("Task");
@@ -974,6 +1017,272 @@ Be concise - code speaks louder than comments.`,
     }
   }
 
+  // ─── Task Spawning ──────────────────────────────────────────────────────
+
+  /** Spawn a background sub-agent task (non-blocking, returns immediately) */
+  spawnTask(opts: {
+    task: string;
+    parentKey: string;
+    agent?: string;
+    model?: string;
+    announce?: boolean;
+    timeoutSeconds?: number;
+    channel: string;
+    replyTo: string;
+    accountId: string;
+  }): { status: string; taskId: string; error?: string } {
+    const maxChildren = this.config.maxChildrenPerSession ?? 3;
+    if (maxChildren <= 0) {
+      return { status: "rejected", taskId: "", error: "Task spawning is disabled" };
+    }
+
+    // Check per-session child limit
+    const childCount = this.countChildrenForSession(opts.parentKey);
+    if (childCount >= maxChildren) {
+      return { status: "rejected", taskId: "", error: `Max children reached (${maxChildren})` };
+    }
+
+    const taskId = this.generateTaskId();
+    const timeout = opts.timeoutSeconds ?? this.config.taskTimeoutSeconds ?? 300;
+
+    const task: SpawnedTask = {
+      taskId,
+      parentKey: opts.parentKey,
+      agent: opts.agent ?? "coder",
+      task: opts.task,
+      status: "queued",
+      announce: opts.announce ?? true,
+      channel: opts.channel,
+      replyTo: opts.replyTo,
+      accountId: opts.accountId,
+      startedAt: Date.now(),
+    };
+
+    this.spawnedTasks.set(taskId, task);
+
+    // Fire and forget — execute in background
+    this.executeSpawnedTask(task, timeout).catch((err) => {
+      console.error(`[agent-runner] Spawned task ${taskId} fatal error:`, err);
+      task.status = "failed";
+      task.error = err instanceof Error ? err.message : String(err);
+      task.completedAt = Date.now();
+    });
+
+    console.log(`[agent-runner] Spawned task ${taskId} (agent: ${task.agent}) for ${opts.parentKey}`);
+    return { status: "accepted", taskId };
+  }
+
+  /** Get status of spawned tasks */
+  getTaskStatus(taskId?: string, parentKey?: string): SpawnedTask[] {
+    if (taskId) {
+      const task = this.spawnedTasks.get(taskId);
+      return task ? [this.sanitizeTask(task)] : [];
+    }
+    if (parentKey) {
+      return Array.from(this.spawnedTasks.values())
+        .filter((t) => t.parentKey === parentKey)
+        .map((t) => this.sanitizeTask(t));
+    }
+    return Array.from(this.spawnedTasks.values()).map((t) => this.sanitizeTask(t));
+  }
+
+  private sanitizeTask(task: SpawnedTask): SpawnedTask {
+    // Return a copy without internal fields
+    const { abortController, timeoutTimer, ...clean } = task;
+    return {
+      ...clean,
+      task: clean.task.slice(0, 500),
+      result: clean.result?.slice(0, 2000),
+    };
+  }
+
+  private countChildrenForSession(parentKey: string): number {
+    let count = 0;
+    for (const task of this.spawnedTasks.values()) {
+      if (task.parentKey === parentKey && (task.status === "queued" || task.status === "running")) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private generateTaskId(): string {
+    return createHash("sha256")
+      .update(Date.now().toString() + Math.random().toString())
+      .digest("hex")
+      .slice(0, 12);
+  }
+
+  /** Execute a spawned task in a background agent session */
+  private async executeSpawnedTask(task: SpawnedTask, timeoutSeconds: number): Promise<void> {
+    if (!this.inProcessMcp || !this.mcpDeps) {
+      task.status = "failed";
+      task.error = "MCP not initialized";
+      task.completedAt = Date.now();
+      return;
+    }
+
+    // Wait for concurrency slot
+    while (this.activeSessions.size >= this.config.maxConcurrent) {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+
+    const sessionKey = `${task.parentKey}:task:${task.taskId}`;
+    this.activeSessions.add(sessionKey);
+    task.status = "running";
+
+    const abortController = new AbortController();
+    task.abortController = abortController;
+
+    // Timeout safety valve
+    task.timeoutTimer = setTimeout(() => {
+      console.log(`[agent-runner] Task ${task.taskId} timed out (${timeoutSeconds}s)`);
+      abortController.abort();
+    }, timeoutSeconds * 1000);
+
+    // Build a restricted MCP server for the sub-agent (no spawn_task, no write_persona)
+    const subMcp = createAgentMcpServer({
+      ...this.mcpDeps,
+      // Sub-agents share the message router but get no messageSentHandlers tracking
+      messageSentHandlers: new Map(),
+    });
+
+    try {
+      const agentDefs = this.buildSubagents();
+      const agentDef = agentDefs[task.agent];
+      const model = agentDef?.model === "inherit"
+        ? this.config.model
+        : agentDef?.model === "haiku"
+          ? "claude-haiku-4-5-20251001"
+          : agentDef?.model === "opus"
+            ? "claude-opus-4-6-20250609"
+            : this.config.model;
+
+      const systemPrompt = agentDef?.prompt ?? `You are a task worker. Complete the assigned task.`;
+      const fullPrompt = [
+        systemPrompt,
+        "",
+        `You have access to send_message to communicate results back to the user.`,
+        `Use send_message with channel="${task.channel}" and to="${task.replyTo}" to send results.`,
+      ].join("\n");
+
+      // Sub-agent allowed tools: messaging + reading, but NO spawn_task, NO write_persona
+      const allowedTools = [
+        "mcp__gateway__send_message",
+        "mcp__gateway__list_messages",
+        "mcp__gateway__list_conversations",
+        "mcp__gateway__memory_search",
+        "mcp__gateway__memory_stats",
+        "mcp__gateway__read_persona",
+      ];
+
+      const q = query({
+        prompt: task.task,
+        options: {
+          model,
+          systemPrompt: {
+            type: "preset",
+            preset: "claude_code",
+            append: fullPrompt,
+          },
+          permissionMode: "bypassPermissions",
+          allowDangerouslySkipPermissions: true,
+          cwd: this.sessionsDir,
+          mcpServers: { gateway: subMcp },
+          allowedTools,
+          ...(this.config.maxTurns > 0 ? { maxTurns: this.config.maxTurns } : {}),
+          maxBudgetUsd: this.config.maxBudgetPerMessage,
+          abortController,
+        },
+      });
+
+      let resultSubtype = "unknown";
+      let lastAssistantText = "";
+
+      for await (const msg of q) {
+        if (msg.type === "assistant" && "message" in msg) {
+          const assistantMsg = msg as { message?: { content?: Array<{ type: string; text?: string }> } };
+          const textBlock = assistantMsg.message?.content?.findLast?.((b: { type: string }) => b.type === "text");
+          if (textBlock && "text" in textBlock) {
+            lastAssistantText = (textBlock as { text: string }).text;
+          }
+        }
+        if (msg.type === "result") {
+          resultSubtype = msg.subtype;
+          const resultMsg = msg as { usage?: { total_cost_usd?: number } };
+          task.cost = resultMsg.usage?.total_cost_usd ?? 0;
+        }
+      }
+
+      task.completedAt = Date.now();
+
+      if (resultSubtype === "success") {
+        task.status = "completed";
+        task.result = lastAssistantText || "(completed without text output)";
+      } else {
+        task.status = "failed";
+        task.error = resultSubtype;
+        task.result = lastAssistantText || undefined;
+      }
+
+      console.log(`[agent-runner] Task ${task.taskId} ${task.status} (${((task.completedAt - task.startedAt) / 1000).toFixed(1)}s, $${(task.cost ?? 0).toFixed(4)})`);
+
+    } catch (err) {
+      task.status = "failed";
+      task.error = err instanceof Error ? err.message : String(err);
+      task.completedAt = Date.now();
+      console.error(`[agent-runner] Task ${task.taskId} error:`, err);
+    } finally {
+      // Cleanup
+      if (task.timeoutTimer) clearTimeout(task.timeoutTimer);
+      task.abortController = undefined;
+      task.timeoutTimer = undefined;
+      this.activeSessions.delete(sessionKey);
+
+      // Announce result to user
+      if (task.announce) {
+        await this.announceTaskResult(task);
+      }
+    }
+  }
+
+  /** Send task completion announcement to user's chat */
+  private async announceTaskResult(task: SpawnedTask): Promise<void> {
+    if (!this.messageRouter) return;
+
+    const duration = task.completedAt
+      ? ((task.completedAt - task.startedAt) / 1000).toFixed(1)
+      : "?";
+    const costStr = task.cost != null ? `$${task.cost.toFixed(4)}` : "";
+
+    let text: string;
+    if (task.status === "completed") {
+      text = [
+        `[Task completed: ${task.agent}]`,
+        task.result?.slice(0, 2000) ?? "(no output)",
+        "",
+        `(taskId: ${task.taskId}, ${duration}s${costStr ? `, ${costStr}` : ""})`,
+      ].join("\n");
+    } else {
+      text = [
+        `[Task failed: ${task.agent}]`,
+        task.error ?? "Unknown error",
+        "",
+        `(taskId: ${task.taskId}, ${duration}s${costStr ? `, ${costStr}` : ""})`,
+      ].join("\n");
+    }
+
+    try {
+      await this.messageRouter.send(
+        task.channel,
+        { to: task.replyTo, text },
+        task.accountId,
+      );
+    } catch (err) {
+      console.error(`[agent-runner] Failed to announce task ${task.taskId}:`, err);
+    }
+  }
+
   // ─── Status & Control ────────────────────────────────────────────────────
 
   getStatus() {
@@ -992,6 +1301,10 @@ Be concise - code speaks louder than comments.`,
       skills: skills.map((s) => s.name),
       subagents: Object.keys(subagents),
       hooks: ["PreToolUse:message_policy", "PostToolUse:tool_logger"],
+      spawnedTasks: {
+        active: Array.from(this.spawnedTasks.values()).filter((t) => t.status === "running" || t.status === "queued").length,
+        total: this.spawnedTasks.size,
+      },
     };
   }
 

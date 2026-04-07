@@ -50,6 +50,8 @@ async function main() {
     maxBudgetPerMessage: agentRunnerConfig.maxBudgetPerMessage,
     systemPrompt: agentRunnerConfig.systemPrompt,
     personaFile: agentRunnerConfig.personaFile,
+    maxChildrenPerSession: agentRunnerConfig.maxChildrenPerSession,
+    taskTimeoutSeconds: agentRunnerConfig.taskTimeoutSeconds,
   });
 
   console.log(`[gateway] Agent runner: ${agentRunnerConfig.enabled ? "enabled" : "disabled"} (model: ${agentRunnerConfig.model})`);

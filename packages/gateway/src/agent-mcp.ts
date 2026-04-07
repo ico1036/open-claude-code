@@ -14,6 +14,32 @@ import type { MessageRouter } from "./message-router.js";
 import type { MessageStore } from "./message-store.js";
 import type { MemoryManager } from "./memory-manager.js";
 
+/** Minimal interface for task spawning — avoids circular import of AgentRunner */
+export type TaskSpawner = {
+  spawnTask(opts: {
+    task: string;
+    parentKey: string;
+    agent?: string;
+    model?: string;
+    announce?: boolean;
+    timeoutSeconds?: number;
+    channel: string;
+    replyTo: string;
+    accountId: string;
+  }): { status: string; taskId: string; error?: string };
+  getTaskStatus(taskId?: string, parentKey?: string): Array<{
+    taskId: string;
+    status: string;
+    agent: string;
+    task: string;
+    startedAt: number;
+    completedAt?: number;
+    result?: string;
+    error?: string;
+    cost?: number;
+  }>;
+};
+
 export type AgentMcpDeps = {
   messageRouter: MessageRouter;
   store: MessageStore;
@@ -21,6 +47,16 @@ export type AgentMcpDeps = {
   dataDir: string;
   /** Per-conversation callbacks fired when send_message succeeds (key: "channel:to") */
   messageSentHandlers: Map<string, () => void>;
+  /** Task spawner for background sub-agent tasks (null for sub-agent sessions) */
+  taskSpawner?: TaskSpawner | null;
+  /** Current conversation key (for task spawning context) */
+  conversationKey?: string;
+  /** Current channel (for task spawning context) */
+  currentChannel?: string;
+  /** Current reply-to target (for task spawning context) */
+  currentReplyTo?: string;
+  /** Current account ID (for task spawning context) */
+  currentAccountId?: string;
 };
 
 /** Valid persona file names that the agent can read/write */
@@ -173,6 +209,66 @@ export function createAgentMcpServer(deps: AgentMcpDeps) {
           writeFileSync(filePath, args.content, "utf-8");
           return {
             content: [{ type: "text", text: `Successfully updated ${args.file}` }],
+          };
+        },
+      ),
+
+      // ─── Task Spawning Tools ───────────────────────────────────────────
+
+      tool(
+        "spawn_task",
+        "Spawn a background sub-agent task. Returns immediately — the task runs in the background. Use this for long-running work (file analysis, refactoring, research) so you can keep chatting with the user. The sub-agent will announce its result to the chat when done.",
+        {
+          task: z.string().describe("Full instruction for the sub-agent — include all context it needs"),
+          agent: z.string().optional().describe("Agent profile to use: 'coder', 'researcher', 'translator', or a custom agent name (default: 'coder')"),
+          announce: z.boolean().optional().describe("Auto-send result to chat on completion (default: true)"),
+          timeoutSeconds: z.number().optional().describe("Abort timeout in seconds (default: 300)"),
+        },
+        async (args) => {
+          if (!deps.taskSpawner) {
+            return {
+              content: [{ type: "text", text: JSON.stringify({ status: "rejected", error: "Task spawning not available in this context" }) }],
+            };
+          }
+          if (!deps.conversationKey || !deps.currentChannel || !deps.currentReplyTo) {
+            return {
+              content: [{ type: "text", text: JSON.stringify({ status: "rejected", error: "Missing conversation context" }) }],
+            };
+          }
+
+          const result = deps.taskSpawner.spawnTask({
+            task: args.task,
+            parentKey: deps.conversationKey,
+            agent: args.agent,
+            announce: args.announce,
+            timeoutSeconds: args.timeoutSeconds,
+            channel: deps.currentChannel,
+            replyTo: deps.currentReplyTo,
+            accountId: deps.currentAccountId ?? "default",
+          });
+
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        },
+      ),
+
+      tool(
+        "task_status",
+        "Check the status of spawned background tasks. Call without taskId to list all tasks for this conversation.",
+        {
+          taskId: z.string().optional().describe("Specific task ID to check (omit to list all)"),
+        },
+        async (args) => {
+          if (!deps.taskSpawner) {
+            return {
+              content: [{ type: "text", text: "Task spawning not available in this context" }],
+            };
+          }
+
+          const tasks = deps.taskSpawner.getTaskStatus(args.taskId, deps.conversationKey);
+          return {
+            content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }],
           };
         },
       ),
