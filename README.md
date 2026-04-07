@@ -1,52 +1,104 @@
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.2.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="license" />
+  <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="node" />
+  <img src="https://img.shields.io/badge/Agent%20SDK-0.2.0-purple" alt="agent-sdk" />
+  <img src="https://img.shields.io/badge/telegram-tested-blue?logo=telegram" alt="telegram" />
+</p>
+
+<p align="center">
+  <b>English</b> | <a href="./README_KR.md">한국어</a>
+</p>
+
 # OpenClaudeCode
 
-**v0.1.0**
+Turn **Claude Code** into an autonomous, multi-channel messaging AI assistant with self-evolving persona, long-term memory, and **non-blocking background task execution**.
 
-An open-source project that turns Claude Code into a multi-channel messaging AI assistant with self-evolving persona and long-term memory.
+Connect Telegram, WhatsApp, or Discord — Claude responds automatically, forms its own personality through conversation, delegates heavy work to background sub-agents, and remembers everything across sessions.
 
-Connect Telegram, WhatsApp, or Discord and Claude will automatically respond to messages, form its own personality through conversation, and remember everything across sessions.
+> **Status**: Telegram fully tested in production. WhatsApp and Discord adapters implemented but untested.
 
-> **Status**: Telegram is fully tested and working. WhatsApp and Discord adapters are implemented but not yet tested in production.
+Built on the official **Claude Agent SDK** — uses your Claude Max subscription through `query()`. No API key hacking, no ToS violations, no ban risk.
 
-Built on the official **Claude Agent SDK** — uses your Claude Max subscription legitimately through `query()`. No API key hacking, no ToS violations, no ban risk.
+---
 
-## Why This Exists
+## Highlights
 
-Inspired by [OpenClaw](https://github.com/nicholasgriffintn/openclaw), which builds its own agent engine from scratch. OpenClaudeCode takes a different approach: instead of reimplementing session management, tool routing, and sandboxing, it sits on top of the **official Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`). This means every feature — session resume, subagents, hooks, cost tracking — comes from Anthropic's own SDK, used exactly as intended. No workarounds, no reverse engineering, no risk of getting your account banned.
+- **Multi-channel**: Telegram, WhatsApp, Discord from a single gateway
+- **Self-evolving persona**: Bot negotiates its own name, discovers your preferences, evolves personality naturally
+- **Long-term memory**: FTS5 full-text search + persona files + daily logs — survives restarts
+- **Background task spawning** (v0.2.0): Delegate long-running work to sub-agents while keeping the main conversation responsive
+- **Subagents**: translator (Haiku), researcher (Haiku), coder (Sonnet), plus custom agents via `AGENTS.md`
+- **Skills system**: Drop `SKILL.md` files into `~/.openclaudecode/skills/` to extend behavior
+- **Zero config**: `pnpm install && pnpm build` — tell Claude your bot token in English, done
+
+---
+
+## What's New in v0.2.0
+
+### Non-Blocking Task Spawning (`spawn_task`)
+
+Inspired by [OpenClaw](https://github.com/nicholasgriffintn/openclaw)'s `sessions_spawn` pattern. The main agent can now delegate long-running work to background sub-agents **without blocking the conversation**.
+
+```
+User: "Review the codebase and summarize the architecture. Meanwhile let's chat."
+Bot:  "Kicked off a code review in the background. What do you want to talk about?"
+
+User: "What's for lunch?"
+Bot:  "How about ramen? 🍜"       ← responds instantly while coder works
+
+[30 seconds later, auto-announce]
+Bot:  "[Task completed: coder]
+       The project has 6 packages: gateway, adapter-core, adapter-telegram..."
+```
+
+**How it works:**
+- `spawn_task` returns immediately with `{ status: "accepted", taskId }`
+- Sub-agent runs in an isolated session (own context, own token budget)
+- On completion, result is auto-announced to the chat
+- Main agent stays responsive — handles new messages while tasks run
+- `task_status` tool to check progress at any time
+
+**Concurrency controls:**
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `maxChildrenPerSession` | 3 | Max background tasks per conversation |
+| `taskTimeoutSeconds` | 300 | Auto-abort safety valve |
+| `maxConcurrent` | 3 | Global concurrent session limit (shared) |
+
+**Sub-agent isolation:**
+- No `spawn_task` (no recursive spawning)
+- No `write_persona` (can't modify bot personality)
+- Full access to messaging, memory search, and file tools
 
 ---
 
 ## Quick Start
 
-### 1. Prerequisites
+### Prerequisites
 
 - **Node.js** 22+
 - **pnpm** (`npm install -g pnpm`)
-- **Claude Code** CLI installed and logged in (`claude --version` to verify)
-- **Telegram Bot Token** (see step 3)
+- **Claude Code** CLI installed and logged in
+- **Telegram Bot Token** from [@BotFather](https://t.me/BotFather)
 
-### 2. Install
+### Install
 
 ```bash
 git clone https://github.com/ico1036/open-claude-code.git
 cd open-claude-code
 pnpm install
-pnpm -r build
+pnpm build
 ```
 
-### 3. Create a Telegram Bot
-
-1. Open Telegram, search `@BotFather`
-2. Send `/newbot` → pick a name → copy the bot token
-
-### 4. Run
+### Connect Telegram
 
 ```bash
-# Start the daemon
+# Start the gateway daemon
 node packages/gateway/dist/gateway-daemon.js
 ```
 
-In a separate terminal, open Claude Code:
+In a separate terminal:
 
 ```bash
 cd open-claude-code
@@ -57,164 +109,133 @@ Tell Claude:
 
 ```
 Connect my Telegram bot with token 7123456789:AAHxxxxxxx
-```
-
-```
 Enable auto-reply for Telegram
 ```
 
-Done. Send a message to your Telegram bot and Claude will respond automatically.
+Send a message to your bot. That's it.
 
-### 5. Auto-start on Reboot (Optional)
+### Auto-start on Reboot (macOS)
 
 ```bash
 pnpm daemon:install
 ```
 
-Registers as a macOS launchd service. Starts on login, restarts on crash.
-
 ### WhatsApp / Discord
 
 ```
-# WhatsApp — QR code appears in daemon logs, scan to connect
+# WhatsApp — scan QR code from daemon logs
 Connect WhatsApp
 
-# Discord — get a bot token from Developer Portal first
+# Discord — bot token from Developer Portal
 Connect Discord with bot token YOUR_TOKEN
 ```
 
 ---
 
-## Troubleshooting
-
-When something goes wrong, just ask Claude Code. The agent will diagnose it.
+## Architecture
 
 ```
-Check gateway status
-```
-
-```
-Show Telegram connection status
-```
-
-```
-List recent messages
-```
-
-### Common Issues
-
-| Symptom | Fix |
-|---------|-----|
-| Bot not responding | `Check auto-responder status` — autoReply might be off |
-| "Gateway daemon is not running" | `Start the gateway` or `node packages/gateway/dist/gateway-daemon.js` |
-| Telegram disconnected | `Reconnect Telegram` |
-| Telegram `getMe` network error | **VPN may be blocking `api.telegram.org`**. Disable VPN or use split tunneling to exclude Telegram API traffic. Some VPNs (especially those routing through countries where Telegram is blocked) will prevent the bot from connecting. |
-| Only respond to certain users | `Add user123 to Telegram allowFrom` |
-| Reset conversation | Send `/new` or `/reset` in Telegram |
-| Change persona | Ask naturally in Telegram, or edit `~/.openclaudecode/SOUL.md` directly |
-
-### Dashboard
-
-Open `http://127.0.0.1:19280` in your browser for real-time status.
-
----
-
-## vs OpenClaw
-
-| | OpenClaw | OpenClaudeCode |
-|---|---------|----------------|
-| **Scope** | 13+ channels, full-stack AI OS | 6 packages, lightweight, focused |
-| **Agent engine** | Custom-built (sessions, routing, sandbox) | **Claude Agent SDK** native (`query()`) |
-| **Memory** | Vector embeddings + BM25 hybrid search | FTS5 + persona files + daily logs (local, no external deps) |
-| **Persona** | SOUL.md, manually edited | Bot **evolves its own persona through conversation** (`write_persona`) |
-| **Subagents** | Custom registry + spawn management | Agent SDK `agents` option (translator, researcher, coder) |
-| **Channels** | 13+ (Teams, Matrix, Zalo, iMessage...) | 3 (Telegram, WhatsApp, Discord) — essentials only |
-| **Config** | JSON schema + Doctor tool | YAML, or just tell Claude Code in plain English |
-| **Security** | DM pairing, Docker sandbox, tool policies | allowFrom whitelist, hook-based message policies |
-| **Auth** | API keys or self-managed OAuth | Claude Max subscription, auto-authenticated (no key needed) |
-| **Setup** | Nix/Docker/manual, complex config | `pnpm install && pnpm -r build` — that's it |
-| **Extensibility** | Plugin SDK, ClawHub registry | Skills (`SKILL.md`), custom agents in AGENTS.md |
-
-**In short**: OpenClaw builds everything from scratch. OpenClaudeCode builds on the Agent SDK to get the **same core features with far less code** — and zero ban risk.
-
----
-
-## How It Works
-
-### Architecture
-
-```
-[Telegram/WhatsApp/Discord Users]
+[Telegram / WhatsApp / Discord]
          | messages
          v
-[Channel Adapters] --- grammy / Baileys / discord.js
+[Channel Adapters] ─── grammy / Baileys / discord.js
          |
          v
-[Gateway Daemon] --- Node.js background process
+[Gateway Daemon] ─── Node.js background process
     |
-    |-- Message Store (SQLite) --- persists all messages
-    |-- Memory Manager (FTS5) --- full-text search over past conversations
-    |-- Channel Manager --- adapter lifecycle
-    |-- Message Router --- outbound message delivery
-    |-- HTTP Server --- dashboard + REST API
-    |-- IPC Server --- Claude Code MCP connection (Unix socket)
+    |── Message Store (SQLite)
+    |── Memory Manager (FTS5)
+    |── Channel Manager
+    |── Message Router
+    |── HTTP Server (:19280)
+    |── IPC Server (Unix socket → Claude Code MCP)
     |
-    +-- AgentRunner --- core agent engine
+    └── AgentRunner
          |
-         |-- Agent SDK query() --- Claude API calls
-         |-- In-process MCP (7 tools) --- zero IPC overhead
-         |-- Session Resume --- per-conversation continuity
-         |-- Persona Loader --- SOUL + IDENTITY + USER + AGENTS
-         |-- Memory --- MEMORY.md + daily logs
-         |-- Subagents --- translator / researcher / coder
-         |-- Hooks --- PreToolUse (policy) / PostToolUse (logging)
-         +-- Skills --- SKILL.md loader
+         |── Agent SDK query()
+         |── In-process MCP (9 tools)
+         |── Session Resume (per-conversation)
+         |── Persona Loader (SOUL + IDENTITY + USER + AGENTS)
+         |── Memory (MEMORY.md + daily logs + FTS5)
+         |── Subagents (translator / researcher / coder)
+         |── Task Spawner ← NEW in v0.2.0
+         |    |── spawn_task (non-blocking)
+         |    |── task_status (query)
+         |    |── Auto-announce on completion
+         |    └── Concurrency + timeout controls
+         |── Hooks (PreToolUse / PostToolUse)
+         └── Skills (SKILL.md loader)
 ```
 
 ### Message Flow
 
 1. User sends a message on Telegram
-2. Channel Adapter receives it, passes to Channel Manager
-3. Message stored in SQLite
-4. AgentRunner picks it up: checks autoReply + allowFrom
-5. Batches messages from the same user for 1.5s (debounce)
-6. Assembles system prompt from 4 persona files + MEMORY.md + skills
-7. Calls Agent SDK `query()` with session resume
-8. Claude uses `send_message` tool to reply → Message Router → Adapter → user
-9. Conversation logged to `memory/YYYY-MM-DD.md`
+2. Adapter receives → Channel Manager → stored in SQLite
+3. AgentRunner checks `autoReply` + `allowFrom`
+4. Batches rapid messages (1.5s debounce)
+5. Loads persona (4 files) + MEMORY.md + skills into system prompt
+6. Calls `query()` with session resume
+7. Claude decides: reply directly, or `spawn_task` for heavy work
+8. Replies via `send_message` → Router → Adapter → user
+9. Background tasks announce results when done
+10. Everything logged to `memory/YYYY-MM-DD.md` + FTS5 index
 
-### Persona System
+---
+
+## Persona System
 
 ```
 ~/.openclaudecode/
-├── SOUL.md       # Personality, tone, behavioral rules (bot can self-modify)
-├── IDENTITY.md   # Name, role
-├── USER.md       # User's name, preferences (auto-created during conversation)
+├── SOUL.md       # Personality, tone, behavioral rules (self-modifying)
+├── IDENTITY.md   # Bot's name and role
+├── USER.md       # User's name, preferences (auto-created on first chat)
 ├── AGENTS.md     # Custom subagent definitions
-└── MEMORY.md     # Long-term facts (injected into system prompt, capped at 200 lines)
+├── MEMORY.md     # Long-term facts (capped at 200 lines)
+├── memory/       # Daily conversation logs
+└── skills/       # SKILL.md extensions
 ```
 
-On first conversation, the bot asks the user's name, negotiates its own name, discovers personality preferences through natural back-and-forth, and persists everything via `write_persona`. The persona evolves naturally as conversations accumulate.
+On first conversation the bot runs an onboarding flow: asks your name, negotiates its own name, discovers your style preferences, and saves everything via `write_persona`. The persona evolves naturally over time.
 
-### Memory Layers
+---
 
-| Layer | Storage | Purpose |
-|-------|---------|---------|
-| Session context | Agent SDK internal | Current conversation continuity |
-| Persona files | `~/.openclaudecode/*.md` | Identity, personality, user info (loaded at session start) |
-| Daily logs | `memory/YYYY-MM-DD.md` | Chronological conversation record |
-| Long-term memory | `MEMORY.md` | Important facts (bot writes these itself) |
-| Full-text search | SQLite FTS5 | Keyword search across all past conversations |
+## MCP Tools
 
-### MCP Tools
+### Interactive (Claude Code → Gateway, 13 tools)
 
-**Interactive (used from Claude Code, 13 tools)**:
-gateway_status, gateway_start, channel_connect, channel_disconnect, channel_status, send_message, list_messages, list_conversations, configure_channel, auto_responder_status, auto_responder_toggle, memory_search, memory_stats
+| Tool | Description |
+|------|-------------|
+| `gateway_status` | Daemon status, uptime, channels |
+| `gateway_start` | Start daemon |
+| `channel_connect` | Connect a channel |
+| `channel_disconnect` | Disconnect a channel |
+| `channel_status` | Channel connection state |
+| `send_message` | Send message to recipient |
+| `list_messages` | List messages (filtered) |
+| `list_conversations` | List active conversations |
+| `configure_channel` | Update channel config |
+| `auto_responder_status` | Agent runner status |
+| `auto_responder_toggle` | Enable/disable agent |
+| `memory_search` | Full-text search past conversations |
+| `memory_stats` | Memory index statistics |
 
-**In-process (used by the agent, 7 tools)**:
-send_message, list_messages, list_conversations, memory_search, memory_stats, read_persona, write_persona
+### In-process (Agent → Gateway, 9 tools)
 
-### Subagents
+| Tool | Description |
+|------|-------------|
+| `send_message` | Reply to user |
+| `list_messages` | Read conversation history |
+| `list_conversations` | List active chats |
+| `memory_search` | Search past conversations |
+| `memory_stats` | Memory statistics |
+| `read_persona` | Read persona/memory files |
+| `write_persona` | Update persona/memory files |
+| **`spawn_task`** | Delegate work to background sub-agent |
+| **`task_status`** | Check spawned task progress |
+
+---
+
+## Subagents
 
 | Name | Model | Purpose |
 |------|-------|---------|
@@ -222,7 +243,9 @@ send_message, list_messages, list_conversations, memory_search, memory_stats, re
 | researcher | Haiku | Web search and info gathering |
 | coder | Sonnet | Code generation and analysis |
 
-Define custom agents in AGENTS.md:
+### Custom Agents
+
+Define in `~/.openclaudecode/AGENTS.md`:
 
 ````markdown
 ```agent name=my-agent model=haiku
@@ -233,29 +256,99 @@ System prompt for the agent
 ```
 ````
 
-### Configuration
+---
+
+## Configuration
 
 `~/.openclaudecode/config.yaml`:
 
 ```yaml
 gateway:
   port: 19280
-
-agentRunner:
-  model: "claude-sonnet-4-5-20250929"
-  maxConcurrent: 3
-  debounceMs: 1500
-  maxTurns: 10
-  maxBudgetPerMessage: 999  # default: 999 (USD)
+  agentRunner:
+    model: "claude-sonnet-4-5-20250929"
+    maxConcurrent: 3
+    debounceMs: 1500
+    maxTurns: 10
+    maxBudgetPerMessage: 999
+    maxChildrenPerSession: 3    # max background tasks per conversation
+    taskTimeoutSeconds: 300     # auto-abort timeout for spawned tasks
 
 channels:
   telegram:
     botToken: "YOUR_TOKEN"
     autoReply: true
-    allowFrom: []      # empty = allow all users
+    allowFrom: []  # empty = allow all
 ```
 
-> **Note:** `maxBudgetPerMessage` is the per-message cost limit (USD) enforced by the Agent SDK. Claude Code Max subscribers can safely keep the default (`999`) since billing is handled by subscription, not per-token.
+> `maxBudgetPerMessage` is the per-message cost limit (USD) enforced by the Agent SDK. Claude Max subscribers can safely keep the default since billing is subscription-based.
+
+---
+
+## Troubleshooting
+
+Ask Claude Code directly — it can diagnose most issues:
+
+```
+Check gateway status
+Show Telegram connection status
+List recent messages
+```
+
+| Symptom | Fix |
+|---------|-----|
+| Bot not responding | Check `auto_responder_status` — autoReply might be off |
+| "Gateway not running" | `Start the gateway` or run the daemon manually |
+| Telegram disconnected | `Reconnect Telegram` |
+| Telegram `getMe` error | VPN may block `api.telegram.org` — disable or split tunnel |
+| Restrict to certain users | `Add user123 to Telegram allowFrom` |
+| Reset conversation | Send `/new` or `/reset` in chat |
+| Change persona | Ask naturally, or edit `~/.openclaudecode/SOUL.md` |
+| Background task stuck | Auto-aborts after `taskTimeoutSeconds` (default 300s) |
+
+### Dashboard
+
+`http://127.0.0.1:19280` — real-time status.
+
+---
+
+## vs OpenClaw
+
+| | OpenClaw | OpenClaudeCode |
+|---|---------|----------------|
+| **Scope** | 13+ channels, full AI OS | 6 packages, lightweight |
+| **Agent engine** | Custom-built | **Claude Agent SDK** (`query()`) |
+| **Task spawning** | `sessions_spawn` + orchestrator | `spawn_task` + auto-announce |
+| **Memory** | Vector + BM25 hybrid | FTS5 + persona files + daily logs |
+| **Persona** | SOUL.md, manual | Self-evolving via `write_persona` |
+| **Subagents** | Custom registry + spawn mgmt | Agent SDK `agents` + custom AGENTS.md |
+| **Channels** | 13+ | 3 (Telegram, WhatsApp, Discord) |
+| **Setup** | Nix/Docker, complex config | `pnpm install && pnpm build` |
+| **Auth** | API keys / self-managed | Claude Max subscription (no key needed) |
+| **Security** | Docker sandbox, DM pairing | allowFrom whitelist, hook policies |
+
+**TL;DR**: OpenClaw builds everything from scratch. OpenClaudeCode gets the **same core features with far less code** on top of the official Agent SDK.
+
+---
+
+## Changelog
+
+### v0.2.0 (2026-04-07)
+- **`spawn_task`**: Non-blocking background sub-agent execution
+- **`task_status`**: Query spawned task progress
+- **Auto-announce**: Task results pushed to chat on completion
+- **Concurrency controls**: `maxChildrenPerSession`, `taskTimeoutSeconds`
+- Sub-agent isolation (no recursive spawn, no persona write)
+
+### v0.1.0 (2026-03-28)
+- Initial release
+- Gateway daemon with Telegram/WhatsApp/Discord adapters
+- Agent SDK integration with session resume
+- Multi-file persona system (SOUL, IDENTITY, USER, AGENTS)
+- FTS5 memory search + daily logs
+- Built-in subagents (translator, researcher, coder)
+- Skills system (SKILL.md)
+- Hook-based message policies
 
 ---
 
