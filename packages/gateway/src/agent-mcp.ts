@@ -62,6 +62,60 @@ export type AgentMcpDeps = {
 /** Valid persona file names that the agent can read/write */
 const PERSONA_FILES = ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "MEMORY.md"] as const;
 
+/** Max message length per chunk (Telegram limit is 4096) */
+const MAX_CHUNK_LENGTH = 4000;
+
+/**
+ * Split long text into chunks at markdown-aware boundaries.
+ * Preserves code fences: when splitting inside a code block,
+ * closes the fence and reopens it in the next chunk.
+ */
+function chunkMarkdownText(text: string, maxLen = MAX_CHUNK_LENGTH): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) {
+      chunks.push(remaining);
+      break;
+    }
+
+    let splitAt = maxLen;
+
+    // Try to split at a double newline (paragraph break)
+    const paraBreak = remaining.lastIndexOf("\n\n", maxLen);
+    if (paraBreak > maxLen * 0.3) {
+      splitAt = paraBreak + 2;
+    } else {
+      // Fall back to single newline
+      const lineBreak = remaining.lastIndexOf("\n", maxLen);
+      if (lineBreak > maxLen * 0.3) {
+        splitAt = lineBreak + 1;
+      }
+    }
+
+    let chunk = remaining.slice(0, splitAt);
+    remaining = remaining.slice(splitAt);
+
+    // Handle code fences: check if we're splitting inside a code block
+    const fenceMatches = chunk.match(/```[\w]*/g) ?? [];
+    const isInsideCodeBlock = fenceMatches.length % 2 !== 0;
+
+    if (isInsideCodeBlock) {
+      // Find what language the last opening fence used
+      const lastOpenFence = chunk.match(/```[\w]*(?![\s\S]*```)/)?.[0] ?? "```";
+      chunk += "\n```";
+      remaining = lastOpenFence + "\n" + remaining;
+    }
+
+    chunks.push(chunk);
+  }
+
+  return chunks;
+}
+
 export function createAgentMcpServer(deps: AgentMcpDeps) {
   const { messageRouter, store, memoryManager, dataDir } = deps;
 
@@ -80,18 +134,35 @@ export function createAgentMcpServer(deps: AgentMcpDeps) {
           accountId: z.string().optional().describe("Account ID to use (optional, default: 'default')"),
         },
         async (args) => {
-          const result = await messageRouter.send(
-            args.channel,
-            { to: args.to, text: args.text, replyToId: args.replyToId },
-            args.accountId ?? "default",
-          );
+          const chunks = chunkMarkdownText(args.text);
+          let lastResult: unknown = null;
+          let allSuccess = true;
+
+          for (const chunk of chunks) {
+            const result = await messageRouter.send(
+              args.channel,
+              { to: args.to, text: chunk, replyToId: args.replyToId },
+              args.accountId ?? "default",
+            );
+            lastResult = result;
+            if (!(result as { success?: boolean }).success) {
+              allSuccess = false;
+              break;
+            }
+          }
+
           // Notify the reply tracker for this conversation
-          if (result.success) {
+          if (allSuccess) {
             const handlerKey = `${args.channel}:${args.to}`;
             deps.messageSentHandlers.get(handlerKey)?.();
           }
           return {
-            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify(
+              chunks.length > 1
+                ? { ...lastResult as object, chunked: true, totalChunks: chunks.length }
+                : lastResult,
+              null, 2,
+            ) }],
           };
         },
       ),
