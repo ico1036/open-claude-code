@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license" />
   <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="node" />
   <img src="https://img.shields.io/badge/Agent%20SDK-0.2.0-purple" alt="agent-sdk" />
@@ -28,6 +28,8 @@ Built on the official **Claude Agent SDK** — uses your Claude Max subscription
 - **Self-evolving persona**: Bot negotiates its own name, discovers your preferences, evolves personality naturally
 - **Long-term memory**: FTS5 full-text search + persona files + daily logs — survives restarts
 - **Background task spawning** (v0.2.0): Delegate long-running work to sub-agents while keeping the main conversation responsive
+- **Session intelligence** (v0.3.0): Idle timeout, memory flush before compaction, interrupt commands
+- **Multi-tier memory** (v0.3.0): Global + per-channel memory scopes with automatic context preservation
 - **Subagents**: translator (Haiku), researcher (Haiku), coder (Sonnet), plus custom agents via `AGENTS.md`
 - **Skills system**: Drop `SKILL.md` files into `~/.openclaudecode/skills/` to extend behavior
 - **Zero config**: `pnpm install && pnpm build` — tell Claude your bot token in English, done
@@ -273,6 +275,7 @@ gateway:
     maxBudgetPerMessage: 999
     maxChildrenPerSession: 3    # max background tasks per conversation
     taskTimeoutSeconds: 300     # auto-abort timeout for spawned tasks
+    sessionIdleMinutes: 120     # auto-expire stale sessions (0 = never)
 
 channels:
   telegram:
@@ -303,8 +306,10 @@ List recent messages
 | Telegram `getMe` error | VPN may block `api.telegram.org` — disable or split tunnel |
 | Restrict to certain users | `Add user123 to Telegram allowFrom` |
 | Reset conversation | Send `/new` or `/reset` in chat |
+| Stop current task | Send `/stop`, `/cancel`, `됐어`, or `그만` |
 | Change persona | Ask naturally, or edit `~/.openclaudecode/SOUL.md` |
 | Background task stuck | Auto-aborts after `taskTimeoutSeconds` (default 300s) |
+| Stale context after long idle | Auto-expires after `sessionIdleMinutes` (default 120) |
 
 ### Dashboard
 
@@ -332,6 +337,15 @@ List recent messages
 ---
 
 ## Changelog
+
+### v0.3.0 (2026-04-08)
+- **Session idle timeout**: Auto-expire stale sessions (default 2h), configurable via `sessionIdleMinutes`
+- **Token tracking**: Per-session input/output token and cost accumulation, persisted to disk
+- **Memory flush**: Automatic context preservation to MEMORY.md when tokens approach 160k (80% of context window)
+- **Message chunking**: Markdown-aware splitting at 4000 chars with code fence preservation
+- **Compact envelope**: `[telegram Ryan +5m]` format with elapsed time for temporal awareness
+- **3-tier memory**: Global (`user`) + per-channel (`channel`) memory scopes via `read_persona`/`write_persona` scope parameter
+- **Interrupt mode**: `/stop`, `/cancel`, `됐어`, `그만` to abort active sessions immediately
 
 ### v0.2.0 (2026-04-07)
 - **`spawn_task`**: Non-blocking background sub-agent execution

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license" />
   <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="node" />
   <img src="https://img.shields.io/badge/Agent%20SDK-0.2.0-purple" alt="agent-sdk" />
@@ -28,6 +28,8 @@
 - **자기 진화 페르소나**: 봇이 스스로 이름을 정하고, 사용자 취향을 파악하고, 성격을 자연스럽게 발전시킴
 - **장기 메모리**: FTS5 전문 검색 + 페르소나 파일 + 일별 로그 — 재시작해도 유지
 - **백그라운드 작업 스포닝** (v0.2.0): 무거운 작업을 서브에이전트에게 넘기면서 메인 대화는 계속 가능
+- **세션 인텔리전스** (v0.3.0): idle timeout, 컴팩션 전 메모리 flush, 인터럽트 명령어
+- **멀티 티어 메모리** (v0.3.0): 글로벌 + 채널별 메모리 스코프, 자동 컨텍스트 보존
 - **서브에이전트**: translator (Haiku), researcher (Haiku), coder (Sonnet), AGENTS.md로 커스텀 에이전트 추가 가능
 - **스킬 시스템**: `~/.openclaudecode/skills/`에 `SKILL.md` 파일을 넣으면 동작 확장
 - **제로 설정**: `pnpm install && pnpm build` — Claude에게 봇 토큰 알려주면 끝
@@ -273,6 +275,7 @@ gateway:
     maxBudgetPerMessage: 999
     maxChildrenPerSession: 3    # 대화당 최대 백그라운드 작업 수
     taskTimeoutSeconds: 300     # 스폰된 작업 자동 중단 타임아웃
+    sessionIdleMinutes: 120     # 비활동 세션 자동 만료 (0 = 만료 안 함)
 
 channels:
   telegram:
@@ -303,8 +306,10 @@ Claude Code에 직접 물어보세요 — 대부분 문제를 진단할 수 있�
 | 텔레그램 `getMe` 오류 | VPN이 `api.telegram.org`을 차단할 수 있음 — 비활성화 또는 분할 터널링 |
 | 특정 사용자만 허용 | `Add user123 to Telegram allowFrom` |
 | 대화 리셋 | 채팅에서 `/new` 또는 `/reset` 전송 |
+| 현재 작업 중지 | `/stop`, `/cancel`, `됐어`, `그만` 전송 |
 | 페르소나 변경 | 자연스럽게 요청하거나, `~/.openclaudecode/SOUL.md` 직접 편집 |
 | 백그라운드 작업이 멈춤 | `taskTimeoutSeconds` 후 자동 중단 (기본 300초) |
+| 오래 쉰 후 이상한 응답 | `sessionIdleMinutes` 후 자동 만료 (기본 120분) |
 
 ### 대시보드
 
@@ -332,6 +337,15 @@ Claude Code에 직접 물어보세요 — 대부분 문제를 진단할 수 있�
 ---
 
 ## 변경 이력
+
+### v0.3.0 (2026-04-08)
+- **세션 idle timeout**: 비활동 세션 자동 만료 (기본 2시간), `sessionIdleMinutes`로 설정
+- **토큰 추적**: 세션별 input/output 토큰 및 비용 누적, 디스크 영구 저장
+- **메모리 flush**: 토큰이 160k (컨텍스트 80%) 도달 시 중요 컨텍스트를 MEMORY.md에 자동 저장
+- **메시지 청킹**: 4000자 단위 마크다운 인식 분할 + 코드펜스 보존
+- **컴팩트 envelope**: `[telegram Ryan +5m]` 포맷으로 경과 시간 기반 시간 인식
+- **3-tier 메모리**: 글로벌(`user`) + 채널별(`channel`) 메모리 스코프, `read_persona`/`write_persona`의 scope 파라미터
+- **인터럽트 모드**: `/stop`, `/cancel`, `됐어`, `그만`으로 활성 세션 즉시 중단
 
 ### v0.2.0 (2026-04-07)
 - **`spawn_task`**: 논블로킹 백그라운드 서브에이전트 실행
