@@ -1126,12 +1126,21 @@ Be concise - code speaks louder than comments.`,
       this.indexConversationMemory(key, messageTexts, resultSubtype);
 
     } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") {
+      const isAbort =
+        (err instanceof Error && (err.name === "AbortError" || err.message?.includes("abort"))) ||
+        (typeof err === "object" && err !== null && "code" in err && (err as { code: string }).code === "ABORT_ERR") ||
+        abortController.signal.aborted;
+
+      if (isAbort) {
         console.log(`[agent-runner] Session ${key} aborted`);
       } else {
         console.error(`[agent-runner] Session ${key} failed:`, err);
         // Exception: always notify user
-        await sendFallback(DEFAULT_ERROR);
+        try {
+          await sendFallback(DEFAULT_ERROR);
+        } catch {
+          // ignore fallback send failure
+        }
       }
     } finally {
       // --- 10. Cleanup ---

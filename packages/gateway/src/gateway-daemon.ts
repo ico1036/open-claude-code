@@ -325,6 +325,22 @@ function removePidFile(): void {
   }
 }
 
+// Prevent unhandled rejections from crashing the daemon
+process.on("unhandledRejection", (reason) => {
+  console.error("[gateway] Unhandled rejection (non-fatal):", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  // Only crash on truly fatal errors, not abort-related ones
+  if (err.name === "AbortError" || err.message?.includes("abort")) {
+    console.error("[gateway] Caught AbortError (non-fatal):", err.message);
+    return;
+  }
+  console.error("[gateway] Uncaught exception:", err);
+  removePidFile();
+  process.exit(1);
+});
+
 // Run
 main().catch((err) => {
   console.error("[gateway] Fatal error:", err);
